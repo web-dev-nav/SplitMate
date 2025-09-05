@@ -94,7 +94,8 @@ class ExpenseController extends Controller
 
         // Process expenses
         foreach ($expenses as $expense) {
-            $perPerson = $expense->amount / 3;
+            $totalUsers = $users->count();
+            $perPerson = $totalUsers > 0 ? $expense->amount / $totalUsers : $expense->amount;
             $paidBy = $expense->paid_by_user_id;
 
             // Handle payback expenses

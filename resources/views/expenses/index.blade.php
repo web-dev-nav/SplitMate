@@ -24,8 +24,15 @@
     <div class="max-w-4xl mx-auto py-6 px-4">
         <!-- Header -->
         <div class="text-center mb-8">
-            <h1 class="text-5xl font-bold text-gray-800 mb-2">💰 SplitMate</h1>
-            <p class="text-gray-600 text-lg">Simple expense splitting for Navjot, Sapna & Anu</p>
+            <div class="flex justify-between items-center mb-4">
+                <div></div>
+                <h1 class="text-5xl font-bold text-gray-800">💰 SplitMate</h1>
+                <a href="{{ route('settings.index') }}" 
+                   class="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 transition-colors">
+                    ⚙️ Settings
+                </a>
+            </div>
+            <p class="text-gray-600 text-lg">Simple expense splitting among {{ $users->count() }} people</p>
         </div>
 
         @if(session('success'))
@@ -160,7 +167,7 @@
                                    placeholder="Total amount">
                         </div>
                         <div class="text-center text-gray-500 text-sm pt-3">
-                            ÷ 3 = $<span id="perPerson">0.00</span> each
+                            ÷ {{ $users->count() }} = $<span id="perPerson">0.00</span> each
                         </div>
                     </div>
 
@@ -207,12 +214,30 @@
                         </div>
                     </div>
 
-                    <div class="flex gap-3">
-                        <input type="date" name="expense_date" required 
-                               value="{{ date('Y-m-d') }}"
-                               class="flex-1 text-lg border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-blue-500">
-                        <input type="file" name="receipt_photo" accept="image/*"
-                               class="flex-1 text-lg border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-blue-500">
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                            <input type="date" name="expense_date" required 
+                                   value="{{ date('Y-m-d') }}"
+                                   class="w-full text-lg border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-blue-500">
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Receipt Photo</label>
+                            <input type="file" name="receipt_photo" id="receiptFile" accept="image/*" capture="environment"
+                                   class="hidden">
+                            <div class="flex gap-2">
+                                <button type="button" onclick="document.getElementById('receiptFile').click()" 
+                                        class="flex-1 bg-gray-100 text-gray-700 py-3 px-4 rounded-xl text-sm hover:bg-gray-200 transition-colors flex items-center justify-center gap-2">
+                                    📁 Choose File
+                                </button>
+                                <button type="button" onclick="document.getElementById('receiptFile').click()" 
+                                        class="flex-1 bg-blue-100 text-blue-700 py-3 px-4 rounded-xl text-sm hover:bg-blue-200 transition-colors flex items-center justify-center gap-2">
+                                    📷 Take Photo
+                                </button>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">Upload receipt or take a photo for proof</p>
+                        </div>
                     </div>
 
                     <button type="submit" 
@@ -380,7 +405,8 @@
         // Auto-calculate per person amount
         document.querySelector('input[name="amount"]').addEventListener('input', function() {
             const amount = parseFloat(this.value) || 0;
-            const perPerson = (amount / 3).toFixed(2);
+            const userCount = {{ $users->count() }};
+            const perPerson = (amount / userCount).toFixed(2);
             document.getElementById('perPerson').textContent = perPerson;
         });
 
@@ -392,6 +418,12 @@
             } else {
                 paybackOptions.classList.add('hidden');
             }
+        });
+
+        // Handle file selection
+        document.getElementById('receiptFile').addEventListener('change', function() {
+            const fileName = this.files[0] ? this.files[0].name : 'No file selected';
+            console.log('Selected file:', fileName);
         });
     </script>
 </body>

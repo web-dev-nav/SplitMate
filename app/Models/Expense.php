@@ -37,6 +37,8 @@ class Expense extends Model
 
     public function getAmountPerPersonAttribute()
     {
-        return $this->amount / 3;
+        // Get total number of users dynamically
+        $totalUsers = User::count();
+        return $totalUsers > 0 ? $this->amount / $totalUsers : $this->amount;
     }
 }
