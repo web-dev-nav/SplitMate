@@ -181,38 +181,17 @@
                         </select>
                     </div>
 
-                    <!-- Payback Toggle -->
-                    <div class="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4">
-                        <label class="flex items-center space-x-3 cursor-pointer">
-                            <input type="checkbox" name="is_payback" id="paybackToggle" value="1"
-                                   class="w-5 h-5 text-yellow-600 border-2 border-yellow-300 rounded focus:ring-yellow-500">
+                    <!-- Auto Debt Reduction Info -->
+                    <div class="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
+                        <div class="flex items-center space-x-3">
+                            <div class="text-2xl">💡</div>
                             <div>
-                                <span class="text-lg font-medium text-yellow-800">💳 Pay back debt with this expense</span>
-                                <p class="text-sm text-yellow-700">Use this expense to reduce what you owe someone</p>
+                                <span class="text-lg font-medium text-blue-800">Automatic Debt Reduction</span>
+                                <p class="text-sm text-blue-700">If you have existing debts, your share of this expense will automatically reduce them. No manual allocation needed!</p>
                             </div>
-                        </label>
+                        </div>
                     </div>
 
-                    <!-- Payback Options (Hidden by default) -->
-                    <div id="paybackOptions" class="hidden space-y-3">
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Pay back debt to:</label>
-                            <select name="payback_to_user_id" 
-                                    class="w-full text-lg border-2 border-yellow-200 rounded-xl px-4 py-3 focus:outline-none focus:border-yellow-500">
-                                <option value="">Select person to pay back</option>
-                                @foreach($users as $user)
-                                    <option value="{{ $user->id }}">{{ $user->name }}</option>
-                                @endforeach
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Amount to pay back:</label>
-                            <input type="number" name="payback_amount" step="0.01" min="0.01"
-                                   class="w-full text-lg border-2 border-yellow-200 rounded-xl px-4 py-3 focus:outline-none focus:border-yellow-500"
-                                   placeholder="Amount to reduce from debt">
-                            <p class="text-xs text-gray-500 mt-1">Leave empty to use full expense amount</p>
-                        </div>
-                    </div>
 
                     <div class="space-y-4">
                         <div>
@@ -255,7 +234,7 @@
                     <p class="text-gray-600">Someone paid someone back</p>
                 </div>
                 
-                <form action="{{ route('settlements.store') }}" method="POST" class="space-y-4">
+                <form action="{{ route('settlements.store') }}" method="POST" enctype="multipart/form-data" class="space-y-4">
                     @csrf
                     <div class="flex gap-3">
                         <select name="from_user_id" required 
@@ -276,12 +255,35 @@
                     </div>
 
                     <div class="flex gap-3">
-                        <input type="number" name="amount" step="0.01" min="0.01" required 
-                               class="flex-1 text-lg border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-green-500"
-                               placeholder="Amount paid back">
+                        <div class="flex-1">
+                            <input type="number" name="amount" step="0.01" min="0.01" required 
+                                   class="w-full text-lg border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-green-500"
+                                   placeholder="Amount paid back">
+                            <div id="max-amount-hint" class="text-xs text-gray-500 mt-1 hidden">
+                                Maximum: $<span id="max-amount-value">0.00</span>
+                            </div>
+                        </div>
                         <input type="date" name="settlement_date" required 
                                value="{{ date('Y-m-d') }}"
                                class="flex-1 text-lg border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-green-500">
+                    </div>
+
+                    <!-- Payment Screenshot Upload -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Payment Screenshot (Optional)</label>
+                        <input type="file" name="payment_screenshot" id="paymentScreenshotFile" accept="image/*" capture="environment"
+                               class="hidden">
+                        <div class="flex gap-2">
+                            <button type="button" onclick="document.getElementById('paymentScreenshotFile').click()" 
+                                    class="flex-1 bg-gray-100 text-gray-700 py-3 px-4 rounded-xl text-sm hover:bg-gray-200 transition-colors flex items-center justify-center gap-2">
+                                📁 Choose File
+                            </button>
+                            <button type="button" onclick="document.getElementById('paymentScreenshotFile').click()" 
+                                    class="flex-1 bg-green-100 text-green-700 py-3 px-4 rounded-xl text-sm hover:bg-green-200 transition-colors flex items-center justify-center gap-2">
+                                📷 Take Photo
+                            </button>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-1">Upload payment proof (bank transfer, UPI screenshot, etc.)</p>
                     </div>
 
                     <button type="submit" 
@@ -325,45 +327,162 @@
 
                 @forelse($allTransactions as $transaction)
                     @if($transaction->type === 'expense')
-                        @php $expense = $transaction->data @endphp
-                        <div class="flex items-center justify-between p-4 {{ $expense->is_payback ? 'bg-yellow-50 border-l-4 border-yellow-500' : 'bg-blue-50 border-l-4 border-blue-500' }} rounded-xl">
-                            <div class="flex-1">
-                                <div class="flex items-center gap-2 mb-1">
-                                    <p class="font-bold text-lg text-gray-800">{{ $expense->description }}</p>
-                                    @if($expense->is_payback)
-                                        <span class="bg-yellow-200 text-yellow-800 text-xs font-bold px-2 py-1 rounded-full">💳 PAYBACK</span>
-                                    @endif
+                        @php 
+                            $expense = $transaction->data;
+                            $details = $expenseDetails[$expense->id] ?? null;
+                        @endphp
+                        <div class="bg-blue-50 border-l-4 border-blue-500 rounded-xl p-4 mb-4">
+                            <!-- Main expense info -->
+                            <div class="flex items-center justify-between mb-3">
+                                <div class="flex-1">
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <p class="font-bold text-lg text-gray-800">{{ $expense->description }}</p>
+                                    </div>
+                                    <p class="text-gray-600">
+                                        Paid by {{ $expense->paidByUser->name }} • {{ $expense->expense_date->format('M d, Y') }}
+                                        @if($expense->receipt_photo)
+                                            • <a href="{{ Storage::url($expense->receipt_photo) }}" target="_blank" 
+                                                 class="text-blue-600 hover:underline">📷 Receipt</a>
+                                        @endif
+                                        <br><span class="text-xs text-gray-500">Added {{ $expense->created_at->diffForHumans() }}</span>
+                                    </p>
                                 </div>
-                                <p class="text-gray-600">
-                                    Paid by {{ $expense->paidByUser->name }} • {{ $expense->expense_date->format('M d, Y') }}
-                                    @if($expense->is_payback && $expense->paybackToUser)
-                                        • <span class="text-yellow-700 font-medium">Paid back ${{ number_format($expense->payback_amount, 2) }} to {{ $expense->paybackToUser->name }}</span>
-                                    @endif
-                                    @if($expense->receipt_photo)
-                                        • <a href="{{ Storage::url($expense->receipt_photo) }}" target="_blank" 
-                                             class="text-blue-600 hover:underline">📷 Receipt</a>
-                                    @endif
-                                    <br><span class="text-xs text-gray-500">Added {{ $expense->created_at->diffForHumans() }}</span>
-                                </p>
+                                <div class="text-right">
+                                    <p class="font-bold text-xl text-gray-800">${{ number_format($expense->amount, 2) }}</p>
+                                    <p class="text-sm text-gray-600">${{ number_format($expense->amount_per_person, 2) }} each</p>
+                                </div>
                             </div>
-                            <div class="text-right">
-                                <p class="font-bold text-xl text-gray-800">${{ number_format($expense->amount, 2) }}</p>
-                                <p class="text-sm text-gray-600">${{ number_format($expense->amount_per_person, 2) }} each</p>
-                            </div>
+
+                            @if($details)
+                                <!-- Step-by-step breakdown -->
+                                <div class="bg-white rounded-lg border border-blue-200">
+                                    <button onclick="toggleBreakdown({{ $expense->id }})" 
+                                            class="w-full p-4 text-left font-semibold text-gray-800 flex items-center justify-between hover:bg-gray-50 transition-colors border-b border-gray-200">
+                                        <div class="flex items-center gap-2">
+                                            <span class="text-blue-600">📊</span> Step-by-Step Breakdown
+                                            <span class="text-xs text-gray-500 font-normal">(Click to expand)</span>
+                                        </div>
+                                        <span id="breakdown-icon-{{ $expense->id }}" class="text-gray-500 transform transition-transform duration-200">▼</span>
+                                    </button>
+                                    
+                                    <div id="breakdown-content-{{ $expense->id }}" class="hidden px-4 pb-4">
+                                    
+                                    <!-- Step 1: Normal splitting -->
+                                    <div class="mb-4">
+                                        <h5 class="font-medium text-gray-700 mb-2 flex items-center gap-2">
+                                            <span class="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded-full">1</span>
+                                            Normal Expense Split
+                                        </h5>
+                                        <div class="ml-6 space-y-1">
+                                            @foreach($details['normal_splits'] as $split)
+                                                <p class="text-sm text-gray-600">
+                                                    <span class="font-medium">{{ $split['user_name'] }}</span> owes 
+                                                    <span class="font-bold text-blue-600">${{ number_format($split['owes_amount'], 2) }}</span> to {{ $details['paid_by'] }}
+                                                </p>
+                                            @endforeach
+                                        </div>
+                                    </div>
+
+                                    <!-- Step 2: Debt reduction (if any) -->
+                                    @if(count($details['debt_reductions']) > 0)
+                                        <div class="mb-4">
+                                            <h5 class="font-medium text-gray-700 mb-2 flex items-center gap-2">
+                                                <span class="bg-green-100 text-green-800 text-xs font-bold px-2 py-1 rounded-full">2</span>
+                                                Automatic Debt Reduction
+                                            </h5>
+                                            <div class="ml-6 space-y-2">
+                                                <p class="text-sm text-gray-600 mb-2">
+                                                    <span class="font-medium">{{ $details['paid_by'] }}'s share</span> 
+                                                    (<span class="font-bold text-green-600">${{ number_format($details['per_person'], 2) }}</span>) 
+                                                    automatically reduces existing debts:
+                                                </p>
+                                                @foreach($details['debt_reductions'] as $reduction)
+                                                    <div class="bg-green-50 border border-green-200 rounded-lg p-3">
+                                                        <p class="text-sm text-gray-700">
+                                                            <span class="font-medium">{{ $details['paid_by'] }}</span> owed 
+                                                            <span class="font-bold text-red-600">${{ number_format($reduction['debt_before'], 2) }}</span> to 
+                                                            <span class="font-medium">{{ $reduction['user_name'] }}</span>
+                                                        </p>
+                                                        <p class="text-sm text-green-700 mt-1">
+                                                            → Reduced by <span class="font-bold">${{ number_format($reduction['reduction_amount'], 2) }}</span>
+                                                            → Now owes <span class="font-bold text-orange-600">${{ number_format($reduction['debt_after'], 2) }}</span>
+                                                        </p>
+                                                    </div>
+                                                @endforeach
+                                            </div>
+                                        </div>
+                                    @else
+                                        <div class="mb-4">
+                                            <h5 class="font-medium text-gray-700 mb-2 flex items-center gap-2">
+                                                <span class="bg-gray-100 text-gray-600 text-xs font-bold px-2 py-1 rounded-full">2</span>
+                                                No Debt Reduction
+                                            </h5>
+                                            <div class="ml-6">
+                                                <p class="text-sm text-gray-500">
+                                                    {{ $details['paid_by'] }} had no existing debts, so no automatic reduction occurred.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    @endif
+
+                                    <!-- Summary -->
+                                    <div class="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                                        <h5 class="font-medium text-gray-700 mb-2 flex items-center gap-2">
+                                            <span class="text-gray-600">📋</span> Summary
+                                        </h5>
+                                        <div class="ml-6 space-y-1">
+                                            <p class="text-sm text-gray-600">
+                                                • Total expense: <span class="font-bold">${{ number_format($details['amount'], 2) }}</span>
+                                            </p>
+                                            <p class="text-sm text-gray-600">
+                                                • Split among {{ count($details['normal_splits']) + 1 }} people: <span class="font-bold">${{ number_format($details['per_person'], 2) }}</span> each
+                                            </p>
+                                            @if(count($details['debt_reductions']) > 0)
+                                                <p class="text-sm text-gray-600">
+                                                    • {{ $details['paid_by'] }}'s share reduced debts by: <span class="font-bold text-green-600">${{ number_format($details['per_person'], 2) }}</span>
+                                                </p>
+                                            @endif
+                                        </div>
+                                    </div>
+                                    </div>
+                                </div>
+                            @endif
                         </div>
                     @else
                         @php $settlement = $transaction->data @endphp
-                        <div class="flex items-center justify-between p-4 bg-green-50 rounded-xl border-l-4 border-green-500">
-                            <div class="flex-1">
-                                <p class="font-bold text-lg text-gray-800">
-                                    {{ $settlement->fromUser->name }} paid {{ $settlement->toUser->name }}
-                                </p>
-                                <p class="text-gray-600">
-                                    {{ $settlement->settlement_date->format('M d, Y') }}
-                                    <br><span class="text-xs text-gray-500">Recorded {{ $settlement->created_at->diffForHumans() }}</span>
-                                </p>
+                        <div class="bg-green-50 rounded-xl border-l-4 border-green-500 p-4">
+                            <div class="flex items-center justify-between mb-2">
+                                <div class="flex-1">
+                                    <p class="font-bold text-lg text-gray-800">
+                                        {{ $settlement->fromUser->name }} paid {{ $settlement->toUser->name }}
+                                    </p>
+                                    <p class="text-gray-600">
+                                        {{ $settlement->settlement_date->format('M d, Y') }}
+                                        @if($settlement->payment_screenshot)
+                                            • <a href="{{ Storage::url($settlement->payment_screenshot) }}" target="_blank" 
+                                                 class="text-green-600 hover:underline">📷 Payment Proof</a>
+                                        @endif
+                                        <br><span class="text-xs text-gray-500">Recorded {{ $settlement->created_at->diffForHumans() }}</span>
+                                    </p>
+                                </div>
+                                <p class="font-bold text-xl text-green-600">${{ number_format($settlement->amount, 2) }}</p>
                             </div>
-                            <p class="font-bold text-xl text-green-600">${{ number_format($settlement->amount, 2) }}</p>
+                            
+                            @if($settlement->payment_screenshot)
+                                <div class="mt-3 p-3 bg-white rounded-lg border border-green-200">
+                                    <div class="flex items-center gap-2 mb-2">
+                                        <span class="text-green-600">📸</span>
+                                        <span class="text-sm font-medium text-gray-700">Payment Screenshot</span>
+                                    </div>
+                                    <a href="{{ Storage::url($settlement->payment_screenshot) }}" target="_blank" 
+                                       class="block">
+                                        <img src="{{ Storage::url($settlement->payment_screenshot) }}" 
+                                             alt="Payment Screenshot" 
+                                             class="w-full max-w-xs h-32 object-cover rounded-lg border border-gray-200 hover:opacity-80 transition-opacity">
+                                    </a>
+                                    <p class="text-xs text-gray-500 mt-1">Click to view full size</p>
+                                </div>
+                            @endif
                         </div>
                     @endif
                 @empty
@@ -410,21 +529,98 @@
             document.getElementById('perPerson').textContent = perPerson;
         });
 
-        // Toggle payback options
-        document.getElementById('paybackToggle').addEventListener('change', function() {
-            const paybackOptions = document.getElementById('paybackOptions');
-            if (this.checked) {
-                paybackOptions.classList.remove('hidden');
-            } else {
-                paybackOptions.classList.add('hidden');
-            }
-        });
-
         // Handle file selection
         document.getElementById('receiptFile').addEventListener('change', function() {
             const fileName = this.files[0] ? this.files[0].name : 'No file selected';
             console.log('Selected file:', fileName);
         });
+
+        // Handle payment screenshot file selection
+        document.getElementById('paymentScreenshotFile').addEventListener('change', function() {
+            const fileName = this.files[0] ? this.files[0].name : 'No file selected';
+            console.log('Selected payment screenshot:', fileName);
+        });
+
+        // Settlement form validation
+        const settlementForm = document.querySelector('form[action="{{ route('settlements.store') }}"]');
+        const fromUserSelect = settlementForm.querySelector('select[name="from_user_id"]');
+        const toUserSelect = settlementForm.querySelector('select[name="to_user_id"]');
+        const amountInput = settlementForm.querySelector('input[name="amount"]');
+        
+        // Store current balances for validation
+        const currentBalances = @json($balances);
+        
+        function validateSettlementAmount() {
+            const fromUserId = parseInt(fromUserSelect.value);
+            const toUserId = parseInt(toUserSelect.value);
+            const amount = parseFloat(amountInput.value) || 0;
+            
+            if (fromUserId && toUserId) {
+                // Find the current debt amount from the balances structure
+                let currentDebt = 0;
+                if (currentBalances[fromUserId] && currentBalances[fromUserId].owes && currentBalances[fromUserId].owes[toUserId]) {
+                    currentDebt = currentBalances[fromUserId].owes[toUserId];
+                }
+                
+                // Show/hide maximum amount hint
+                const maxAmountHint = document.getElementById('max-amount-hint');
+                const maxAmountValue = document.getElementById('max-amount-value');
+                
+                if (currentDebt > 0) {
+                    maxAmountValue.textContent = currentDebt.toFixed(2);
+                    maxAmountHint.classList.remove('hidden');
+                } else {
+                    maxAmountHint.classList.add('hidden');
+                }
+                
+                // Show validation message
+                let errorDiv = document.getElementById('settlement-amount-error');
+                if (!errorDiv) {
+                    errorDiv = document.createElement('div');
+                    errorDiv.id = 'settlement-amount-error';
+                    errorDiv.className = 'text-red-500 text-sm mt-1';
+                    amountInput.parentNode.appendChild(errorDiv);
+                }
+                
+                if (amount > currentDebt) {
+                    errorDiv.textContent = `You can only pay up to $${currentDebt.toFixed(2)} (the amount you currently owe).`;
+                    amountInput.setCustomValidity('Payment amount exceeds debt');
+                } else {
+                    errorDiv.textContent = '';
+                    amountInput.setCustomValidity('');
+                }
+            } else {
+                // Hide hint when no users selected
+                document.getElementById('max-amount-hint').classList.add('hidden');
+            }
+        }
+        
+        // Add event listeners for validation
+        fromUserSelect.addEventListener('change', validateSettlementAmount);
+        toUserSelect.addEventListener('change', validateSettlementAmount);
+        amountInput.addEventListener('input', validateSettlementAmount);
+        
+        // Prevent form submission if validation fails
+        settlementForm.addEventListener('submit', function(e) {
+            validateSettlementAmount();
+            if (!amountInput.checkValidity()) {
+                e.preventDefault();
+            }
+        });
+
+        // Toggle breakdown visibility
+        function toggleBreakdown(expenseId) {
+            const content = document.getElementById(`breakdown-content-${expenseId}`);
+            const icon = document.getElementById(`breakdown-icon-${expenseId}`);
+            
+            if (content.classList.contains('hidden')) {
+                content.classList.remove('hidden');
+                icon.style.transform = 'rotate(180deg)';
+            } else {
+                content.classList.add('hidden');
+                icon.style.transform = 'rotate(0deg)';
+            }
+        }
     </script>
 </body>
 </html>

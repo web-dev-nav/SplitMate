@@ -10,8 +10,9 @@ class SettingsController extends Controller
 {
     public function index()
     {
-        $users = User::all();
-        return view('settings.index', compact('users'));
+        $users = User::where('is_active', true)->get();
+        $inactiveUsers = User::where('is_active', false)->get();
+        return view('settings.index', compact('users', 'inactiveUsers'));
     }
 
     public function updateUsers(Request $request)
@@ -20,7 +21,6 @@ class SettingsController extends Controller
             'users' => 'required|array|min:2|max:10',
             'users.*.id' => 'nullable|exists:users,id',
             'users.*.name' => 'required|string|max:255',
-            'users.*.email' => 'required|email|max:255',
         ]);
 
         // Update existing users and create new ones
@@ -30,13 +30,11 @@ class SettingsController extends Controller
                 $user = User::find($userData['id']);
                 $user->update([
                     'name' => $userData['name'],
-                    'email' => $userData['email'],
                 ]);
             } else {
                 // Create new user
                 User::create([
                     'name' => $userData['name'],
-                    'email' => $userData['email'],
                     'password' => Hash::make('password123'), // Default password
                 ]);
             }
@@ -47,12 +45,15 @@ class SettingsController extends Controller
 
     public function deleteUser(User $user)
     {
-        // Check if user has any expenses or settlements
-        if ($user->expenses()->count() > 0 || $user->settlementsGiven()->count() > 0 || $user->settlementsReceived()->count() > 0) {
-            return redirect()->back()->with('error', 'Cannot delete user with existing transactions. Please contact admin.');
-        }
+        // Soft delete: mark as inactive instead of hard delete
+        $user->update(['is_active' => false]);
+        return redirect()->back()->with('success', 'User removed successfully! They can be reactivated if needed.');
+    }
 
-        $user->delete();
-        return redirect()->back()->with('success', 'User deleted successfully!');
+    public function reactivateUser(User $user)
+    {
+        // Reactivate a soft-deleted user
+        $user->update(['is_active' => true]);
+        return redirect()->back()->with('success', 'User reactivated successfully!');
     }
 }

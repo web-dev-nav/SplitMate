@@ -12,6 +12,7 @@ class Settlement extends Model
         'to_user_id',
         'amount',
         'settlement_date',
+        'payment_screenshot',
     ];
 
     protected $casts = [

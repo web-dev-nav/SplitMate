@@ -11,3 +11,4 @@ Route::post('/settlements', [ExpenseController::class, 'storeSettlement'])->name
 Route::get('/settings', [SettingsController::class, 'index'])->name('settings.index');
 Route::post('/settings/users', [SettingsController::class, 'updateUsers'])->name('settings.update-users');
 Route::delete('/settings/users/{user}', [SettingsController::class, 'deleteUser'])->name('settings.delete-user');
+Route::post('/settings/users/{user}/reactivate', [SettingsController::class, 'reactivateUser'])->name('settings.reactivate-user');

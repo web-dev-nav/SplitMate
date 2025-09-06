@@ -71,16 +71,12 @@
                                        class="w-full border-2 border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500">
                                 <input type="hidden" name="users[{{ $index }}][id]" value="{{ $user->id }}">
                             </div>
-                            <div class="flex-1">
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                                <input type="email" name="users[{{ $index }}][email]" value="{{ $user->email }}" required
-                                       class="w-full border-2 border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500">
-                            </div>
                             <div class="flex gap-2">
                                 @if($users->count() > 2)
                                     <button type="button" onclick="removeUser(this)" 
-                                            class="bg-red-100 text-red-700 px-3 py-2 rounded-lg hover:bg-red-200 transition-colors">
-                                        🗑️
+                                            class="bg-red-100 text-red-700 px-3 py-2 rounded-lg hover:bg-red-200 transition-colors"
+                                            title="Remove from current group">
+                                        👻
                                     </button>
                                 @endif
                             </div>
@@ -119,12 +115,49 @@
                 </div>
             </div>
 
+            @if($inactiveUsers->count() > 0)
+            <!-- Former Members Section -->
+            <div class="bg-white rounded-2xl shadow-lg p-6 mb-8">
+                <h2 class="text-2xl font-bold text-gray-800 mb-6 text-center">👻 Former Members</h2>
+                
+                <div class="space-y-4">
+                    @foreach($inactiveUsers as $user)
+                        <div class="flex items-center justify-between p-4 bg-gray-100 rounded-xl">
+                            <div class="flex items-center gap-3">
+                                <div class="w-10 h-10 bg-gray-400 rounded-full flex items-center justify-center text-white font-bold">
+                                    {{ strtoupper(substr($user->name, 0, 1)) }}
+                                </div>
+                                <div>
+                                    <div class="font-medium text-gray-800">{{ $user->name }}</div>
+                                    <div class="text-sm text-gray-500">Removed from current group</div>
+                                </div>
+                            </div>
+                            <form action="{{ route('settings.reactivate-user', $user) }}" method="POST" class="inline">
+                                @csrf
+                                <button type="submit" 
+                                        class="bg-green-100 text-green-700 px-4 py-2 rounded-lg hover:bg-green-200 transition-colors text-sm">
+                                    🔄 Reactivate
+                                </button>
+                            </form>
+                        </div>
+                    @endforeach
+                </div>
+                
+                <div class="mt-4 p-3 bg-blue-50 rounded-xl">
+                    <p class="text-sm text-blue-700">
+                        <strong>Note:</strong> Former members can be reactivated if they return. 
+                        Their historical transactions are preserved.
+                    </p>
+                </div>
+            </div>
+            @endif
+
             <div class="mt-6 p-4 bg-yellow-50 rounded-xl">
                 <h3 class="font-bold text-lg text-yellow-800 mb-2">⚠️ Important Notes</h3>
                 <ul class="text-sm text-yellow-700 space-y-1">
                     <li>• You need at least 2 people to use the app</li>
                     <li>• Maximum 10 people supported</li>
-                    <li>• Deleting a person with existing transactions is not allowed</li>
+                    <li>• Removing a person preserves their transaction history</li>
                     <li>• All expenses are split equally among all people</li>
                 </ul>
             </div>
@@ -144,12 +177,6 @@
                                class="w-full border-2 border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
                                placeholder="Enter name">
                         <input type="hidden" name="users[${userIndex}][id]" value="">
-                    </div>
-                    <div class="flex-1">
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                        <input type="email" name="users[${userIndex}][email]" required
-                               class="w-full border-2 border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
-                               placeholder="Enter email">
                     </div>
                     <div class="flex gap-2">
                         <button type="button" onclick="removeUser(this)" 

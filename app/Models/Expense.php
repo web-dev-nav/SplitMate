@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Expense extends Model
 {
@@ -16,6 +17,7 @@ class Expense extends Model
         'is_payback',
         'payback_to_user_id',
         'payback_amount',
+        'user_count_at_time',
     ];
 
     protected $casts = [
@@ -35,10 +37,15 @@ class Expense extends Model
         return $this->belongsTo(User::class, 'payback_to_user_id');
     }
 
+    public function paybacks(): HasMany
+    {
+        return $this->hasMany(ExpensePayback::class);
+    }
+
     public function getAmountPerPersonAttribute()
     {
-        // Get total number of users dynamically
-        $totalUsers = User::count();
+        // Use the user count that existed when this expense was created
+        $totalUsers = $this->user_count_at_time ?? User::count();
         return $totalUsers > 0 ? $this->amount / $totalUsers : $this->amount;
     }
 }
