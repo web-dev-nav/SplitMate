@@ -21,7 +21,7 @@
     </script>
 </head>
 <body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
-    <div class="max-w-4xl mx-auto py-6 px-4">
+    <div class="max-w-4xl mx-auto py-6 px-4 overflow-x-hidden">
         <!-- Header -->
         <div class="text-center mb-8">
             <div class="flex justify-between items-center mb-4">
@@ -69,18 +69,19 @@
             </div>
         @endif
 
-        <!-- Wallet Overview -->
-        <div class="bg-white rounded-2xl shadow-lg p-6 mb-8">
+        <!-- Wallet Overview - Updated for mobile responsiveness -->
+        <div class="bg-white rounded-2xl shadow-lg p-4 mb-8">
             <h2 class="text-2xl font-bold text-gray-800 mb-6 text-center">💰 Wallet Status</h2>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                @foreach($balances as $userId => $balance)
+            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4" style="width: 100%; max-width: 100%; overflow-x: hidden;">
+                @if(count($balances) > 0)
+                    @foreach($balances as $userId => $balance)
                     @php
                         $totalOwed = array_sum($balance['owes']);
                         $totalOwedBy = array_sum($balance['owed_by']);
                         $netAmount = $totalOwedBy - $totalOwed;
                     @endphp
-                    <div class="text-center p-6 rounded-xl {{ $netAmount > 0 ? 'bg-green-50 border-2 border-green-200' : ($netAmount < 0 ? 'bg-red-50 border-2 border-red-200' : 'bg-gray-50 border-2 border-gray-200') }}">
-                        <div class="text-2xl mb-2">
+                    <div class="text-center p-3 rounded-xl {{ $netAmount > 0 ? 'bg-green-50 border-2 border-green-200' : ($netAmount < 0 ? 'bg-red-50 border-2 border-red-200' : 'bg-gray-50 border-2 border-gray-200') }}" style="word-wrap: break-word; overflow-wrap: break-word; max-width: 100%;">
+                        <div class="text-lg md:text-2xl mb-1 md:mb-2">
                             @if($netAmount > 0)
                                 😊
                             @elseif($netAmount < 0)
@@ -89,36 +90,36 @@
                                 🎉
                             @endif
                         </div>
-                        <h3 class="font-bold text-xl text-gray-800 mb-3">{{ $balance['name'] }}</h3>
+                        <h3 class="font-bold text-sm text-gray-800 mb-2 truncate">{{ $balance['name'] }}</h3>
                         
                         @if($netAmount > 0)
-                            <div class="space-y-1">
-                                <p class="text-sm font-medium text-green-600">Wallet Balance:</p>
-                                <p class="text-2xl font-bold text-green-600">+${{ number_format($netAmount, 2) }}</p>
-                                <p class="text-xs text-gray-600">Will receive from others</p>
+                            <div class="space-y-0.5">
+                                <p class="text-xs font-medium text-green-600">Balance:</p>
+                                <p class="text-base font-bold text-green-600">+${{ number_format($netAmount, 2) }}</p>
+                                <p class="text-xs text-gray-600">Will receive</p>
                             </div>
                         @elseif($netAmount < 0)
-                            <div class="space-y-1">
-                                <p class="text-sm font-medium text-red-600">Wallet Balance:</p>
-                                <p class="text-2xl font-bold text-red-600">-${{ number_format(abs($netAmount), 2) }}</p>
-                                <p class="text-xs text-gray-600">Needs to pay others</p>
+                            <div class="space-y-0.5">
+                                <p class="text-xs font-medium text-red-600">Balance:</p>
+                                <p class="text-base font-bold text-red-600">-${{ number_format(abs($netAmount), 2) }}</p>
+                                <p class="text-xs text-gray-600">Needs to pay</p>
                             </div>
                         @else
-                            <div class="space-y-1">
-                                <p class="text-lg font-bold text-gray-600">All settled up!</p>
-                                <p class="text-xs text-gray-500">$0.00 balance</p>
+                            <div class="space-y-0.5">
+                                <p class="text-sm font-bold text-gray-600">All settled!</p>
+                                <p class="text-xs text-gray-500">$0.00</p>
                             </div>
                         @endif
 
                         @if(count($balance['owes']) > 0 || count($balance['owed_by']) > 0)
-                            <div class="mt-4 pt-4 border-t border-gray-200">
+                            <div class="mt-2 pt-2 border-t border-gray-200 text-left">
                                 @if(count($balance['owes']) > 0)
-                                    <div class="mb-2">
-                                        <p class="text-xs font-medium text-red-600 mb-1">Needs to pay:</p>
+                                    <div class="mb-1">
+                                        <p class="text-xs font-medium text-red-600 mb-1">Owes:</p>
                                         @foreach($balance['owes'] as $toUserId => $amount)
                                             @php $toUser = $users->find($toUserId) @endphp
-                                            <p class="text-sm text-red-600">
-                                                ${{ number_format($amount, 2) }} to {{ $toUser->name }}
+                                            <p class="text-xs text-red-600 truncate">
+                                                ${{ number_format($amount, 2) }} → {{ $toUser->name }}
                                             </p>
                                         @endforeach
                                     </div>
@@ -126,11 +127,11 @@
 
                                 @if(count($balance['owed_by']) > 0)
                                     <div>
-                                        <p class="text-xs font-medium text-green-600 mb-1">Will receive:</p>
+                                        <p class="text-xs font-medium text-green-600 mb-1">Gets:</p>
                                         @foreach($balance['owed_by'] as $fromUserId => $amount)
                                             @php $fromUser = $users->find($fromUserId) @endphp
-                                            <p class="text-sm text-green-600">
-                                                ${{ number_format($amount, 2) }} from {{ $fromUser->name }}
+                                            <p class="text-xs text-green-600 truncate">
+                                                ${{ number_format($amount, 2) }} ← {{ $fromUser->name }}
                                             </p>
                                         @endforeach
                                     </div>
@@ -138,7 +139,12 @@
                             </div>
                         @endif
                     </div>
-                @endforeach
+                    @endforeach
+                @else
+                    <div class="col-span-3 text-center py-8">
+                        <p class="text-gray-500">No wallet data available. Please add some users and expenses.</p>
+                    </div>
+                @endif
             </div>
         </div>
 
@@ -203,14 +209,18 @@
                         
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-1">Receipt Photo</label>
-                            <input type="file" name="receipt_photo" id="receiptFile" accept="image/*" capture="environment"
+                            <!-- Hidden file input for gallery -->
+                            <input type="file" name="receipt_photo" id="receiptFileGallery" accept="image/*" 
+                                   class="hidden">
+                            <!-- Hidden file input for camera -->
+                            <input type="file" name="receipt_photo" id="receiptFileCamera" accept="image/*" capture="environment" 
                                    class="hidden">
                             <div class="flex gap-2">
-                                <button type="button" onclick="document.getElementById('receiptFile').click()" 
+                                <button type="button" onclick="document.getElementById('receiptFileGallery').click()" 
                                         class="flex-1 bg-gray-100 text-gray-700 py-3 px-4 rounded-xl text-sm hover:bg-gray-200 transition-colors flex items-center justify-center gap-2">
                                     📁 Choose File
                                 </button>
-                                <button type="button" onclick="document.getElementById('receiptFile').click()" 
+                                <button type="button" onclick="document.getElementById('receiptFileCamera').click()" 
                                         class="flex-1 bg-blue-100 text-blue-700 py-3 px-4 rounded-xl text-sm hover:bg-blue-200 transition-colors flex items-center justify-center gap-2">
                                     📷 Take Photo
                                 </button>
@@ -271,14 +281,18 @@
                     <!-- Payment Screenshot Upload -->
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Payment Screenshot (Optional)</label>
-                        <input type="file" name="payment_screenshot" id="paymentScreenshotFile" accept="image/*" capture="environment"
+                        <!-- Hidden file input for gallery -->
+                        <input type="file" name="payment_screenshot" id="paymentScreenshotFileGallery" accept="image/*" 
+                               class="hidden">
+                        <!-- Hidden file input for camera -->
+                        <input type="file" name="payment_screenshot" id="paymentScreenshotFileCamera" accept="image/*" capture="environment" 
                                class="hidden">
                         <div class="flex gap-2">
-                            <button type="button" onclick="document.getElementById('paymentScreenshotFile').click()" 
+                            <button type="button" onclick="document.getElementById('paymentScreenshotFileGallery').click()" 
                                     class="flex-1 bg-gray-100 text-gray-700 py-3 px-4 rounded-xl text-sm hover:bg-gray-200 transition-colors flex items-center justify-center gap-2">
                                 📁 Choose File
                             </button>
-                            <button type="button" onclick="document.getElementById('paymentScreenshotFile').click()" 
+                            <button type="button" onclick="document.getElementById('paymentScreenshotFileCamera').click()" 
                                     class="flex-1 bg-green-100 text-green-700 py-3 px-4 rounded-xl text-sm hover:bg-green-200 transition-colors flex items-center justify-center gap-2">
                                 📷 Take Photo
                             </button>
@@ -529,16 +543,46 @@
             document.getElementById('perPerson').textContent = perPerson;
         });
 
-        // Handle file selection
-        document.getElementById('receiptFile').addEventListener('change', function() {
+        // Handle receipt file selection (both gallery and camera)
+        document.getElementById('receiptFileGallery').addEventListener('change', function() {
             const fileName = this.files[0] ? this.files[0].name : 'No file selected';
-            console.log('Selected file:', fileName);
+            console.log('Selected receipt file from gallery:', fileName);
+            // Copy the file to the camera input as well
+            if (this.files[0]) {
+                const cameraInput = document.getElementById('receiptFileCamera');
+                cameraInput.files = this.files;
+            }
         });
 
-        // Handle payment screenshot file selection
-        document.getElementById('paymentScreenshotFile').addEventListener('change', function() {
+        document.getElementById('receiptFileCamera').addEventListener('change', function() {
             const fileName = this.files[0] ? this.files[0].name : 'No file selected';
-            console.log('Selected payment screenshot:', fileName);
+            console.log('Selected receipt file from camera:', fileName);
+            // Copy the file to the gallery input as well
+            if (this.files[0]) {
+                const galleryInput = document.getElementById('receiptFileGallery');
+                galleryInput.files = this.files;
+            }
+        });
+
+        // Handle payment screenshot file selection (both gallery and camera)
+        document.getElementById('paymentScreenshotFileGallery').addEventListener('change', function() {
+            const fileName = this.files[0] ? this.files[0].name : 'No file selected';
+            console.log('Selected payment screenshot from gallery:', fileName);
+            // Copy the file to the camera input as well
+            if (this.files[0]) {
+                const cameraInput = document.getElementById('paymentScreenshotFileCamera');
+                cameraInput.files = this.files;
+            }
+        });
+
+        document.getElementById('paymentScreenshotFileCamera').addEventListener('change', function() {
+            const fileName = this.files[0] ? this.files[0].name : 'No file selected';
+            console.log('Selected payment screenshot from camera:', fileName);
+            // Copy the file to the gallery input as well
+            if (this.files[0]) {
+                const galleryInput = document.getElementById('paymentScreenshotFileGallery');
+                galleryInput.files = this.files;
+            }
         });
 
         // Settlement form validation
