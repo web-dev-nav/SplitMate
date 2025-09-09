@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Route;
 Route::get('/', [ExpenseController::class, 'index'])->name('expenses.index');
 Route::post('/expenses', [ExpenseController::class, 'store'])->name('expenses.store');
 Route::post('/settlements', [ExpenseController::class, 'storeSettlement'])->name('settlements.store');
+Route::get('/wallet-snapshots', [ExpenseController::class, 'getWalletSnapshots'])->name('wallet.snapshots');
 
 Route::get('/settings', [SettingsController::class, 'index'])->name('settings.index');
 Route::post('/settings/users', [SettingsController::class, 'updateUsers'])->name('settings.update-users');

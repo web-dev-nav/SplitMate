@@ -39,18 +39,24 @@ class ExpenseController extends Controller
                 'amount' => 'required|numeric|min:0.01',
                 'paid_by_user_id' => 'required|exists:users,id',
                 'expense_date' => 'required|date',
-                'receipt_photo' => 'nullable|image|max:2048',
+                'receipt_photo' => 'required|image|max:2048',
+            ], [
+                'receipt_photo.required' => 'Please upload a receipt photo. This is required for expense tracking.',
+                'receipt_photo.image' => 'The receipt must be an image file (JPG, PNG, GIF, etc.).',
+                'receipt_photo.max' => 'The receipt image must be smaller than 2MB.',
             ]);
 
-            if ($request->hasFile('receipt_photo')) {
-                $validated['receipt_photo'] = $request->file('receipt_photo')->store('receipts', 'public');
-            }
+            $validated['receipt_photo'] = $request->file('receipt_photo')->store('receipts', 'public');
 
             // Set the user count at the time of expense creation
             $validated['user_count_at_time'] = User::count();
 
             // Create the expense
-            Expense::create($validated);
+            $expense = Expense::create($validated);
+
+            // Store wallet snapshot after expense
+            $users = User::where('is_active', true)->get();
+            $this->storeWalletSnapshot($expense->id, null, $users);
 
             $message = 'Expense added successfully!';
 
@@ -67,7 +73,11 @@ class ExpenseController extends Controller
             'to_user_id' => 'required|exists:users,id|different:from_user_id',
             'amount' => 'required|numeric|min:0.01',
             'settlement_date' => 'required|date',
-            'payment_screenshot' => 'nullable|image|max:2048',
+            'payment_screenshot' => 'required|image|max:2048',
+        ], [
+            'payment_screenshot.required' => 'Please upload a payment screenshot. This is required to verify the settlement.',
+            'payment_screenshot.image' => 'The payment proof must be an image file (JPG, PNG, GIF, etc.).',
+            'payment_screenshot.max' => 'The payment screenshot must be smaller than 2MB.',
         ]);
 
         // Check if the payment amount exceeds what the user actually owes
@@ -89,11 +99,13 @@ class ExpenseController extends Controller
             ])->withInput();
         }
 
-        if ($request->hasFile('payment_screenshot')) {
-            $validated['payment_screenshot'] = $request->file('payment_screenshot')->store('payment-screenshots', 'public');
-        }
+        $validated['payment_screenshot'] = $request->file('payment_screenshot')->store('payment-screenshots', 'public');
 
-        Settlement::create($validated);
+        $settlement = Settlement::create($validated);
+
+        // Store wallet snapshot after settlement
+        $users = User::where('is_active', true)->get();
+        $this->storeWalletSnapshot(null, $settlement->id, $users);
 
         return redirect()->back()->with('success', 'Settlement recorded successfully!');
     }
@@ -101,8 +113,8 @@ class ExpenseController extends Controller
     private function calculateBalances()
     {
         $users = User::where('is_active', true)->get();
-        $expenses = Expense::with('paybacks')->get();
-        $settlements = Settlement::all();
+        $expenses = Expense::with('paybacks')->orderBy('created_at')->get();
+        $settlements = Settlement::orderBy('created_at')->get();
         
         // Initialize net balances between each pair of users
         $netBalances = [];
@@ -124,7 +136,7 @@ class ExpenseController extends Controller
             // Get only the users who existed when this expense was created
             $usersAtTime = $users->take($totalUsers);
 
-            // Split expense among users who existed at the time (normal splitting)
+            // Split expense among users who existed at the time (normal splitting) FIRST
             foreach ($usersAtTime as $user) {
                 if ($user->id != $paidBy) {
                     // User owes the person who paid
@@ -177,8 +189,8 @@ class ExpenseController extends Controller
     private function calculateDebtsForUser()
     {
         $users = User::where('is_active', true)->get();
-        $expenses = Expense::with('paybacks')->get();
-        $settlements = Settlement::all();
+        $expenses = Expense::with('paybacks')->orderBy('created_at')->get();
+        $settlements = Settlement::orderBy('created_at')->get();
         
         // Initialize net balances between each pair of users
         $netBalances = [];
@@ -200,7 +212,7 @@ class ExpenseController extends Controller
             // Get only the users who existed when this expense was created
             $usersAtTime = $users->take($totalUsers);
 
-            // Split expense among users who existed at the time (normal splitting)
+            // Split expense among users who existed at the time (normal splitting) FIRST
             foreach ($usersAtTime as $user) {
                 if ($user->id != $paidBy) {
                     // User owes the person who paid
@@ -310,6 +322,9 @@ class ExpenseController extends Controller
                 }
             }
             
+            // Get wallet balance snapshot from database after this expense
+            $details['wallet_snapshot'] = $this->getWalletSnapshotFromDB($expense->id, null);
+            
             $expenseDetails[$expense->id] = $details;
         }
         
@@ -321,9 +336,12 @@ class ExpenseController extends Controller
         // Get all expenses before this one (by created_at)
         $previousExpenses = Expense::where('created_at', '<', $currentExpense->created_at)
             ->with('paybacks')
+            ->orderBy('created_at')
             ->get();
         
-        $settlements = Settlement::where('created_at', '<', $currentExpense->created_at)->get();
+        $settlements = Settlement::where('created_at', '<', $currentExpense->created_at)
+            ->orderBy('created_at')
+            ->get();
         
         // Calculate balances up to this point
         $netBalances = [];
@@ -345,7 +363,7 @@ class ExpenseController extends Controller
             // Get only the users who existed when this expense was created
             $usersAtTime = $users->take($totalUsers);
 
-            // Split expense among users who existed at the time
+            // Split expense among users who existed at the time FIRST
             foreach ($usersAtTime as $user) {
                 if ($user->id != $paidBy) {
                     $netBalances[$user->id][$paidBy] += $perPerson;
@@ -353,7 +371,7 @@ class ExpenseController extends Controller
                 }
             }
 
-            // Auto-reduce debts for the payer
+            // Apply debt reduction logic to get the actual debts that existed
             $this->autoReduceDebtsForPayer($netBalances, $paidBy, $perPerson, $usersAtTime);
         }
 
@@ -399,18 +417,98 @@ class ExpenseController extends Controller
         arsort($debtsToReduce);
 
         $remainingAmount = $perPerson;
-
-        // Reduce debts starting with the highest
+        
+        // Reduce each debt by the available amount from payer's share
         foreach ($debtsToReduce as $userId => $debtAmount) {
             if ($remainingAmount <= 0) break;
-
+            
             $reductionAmount = min($debtAmount, $remainingAmount);
             
-            // Reduce the debt
+            // Reduce the debt: payer owes less to this user
             $netBalances[$paidBy][$userId] -= $reductionAmount;
+            
+            // The other user now owes the payer back the reduction amount
             $netBalances[$userId][$paidBy] += $reductionAmount;
             
             $remainingAmount -= $reductionAmount;
         }
+    }
+
+    private function storeWalletSnapshot($expenseId = null, $settlementId = null, $users)
+    {
+        // Calculate current wallet balances (this already includes debt reductions)
+        $balances = $this->calculateBalances();
+        
+        foreach ($users as $user) {
+            if (isset($balances[$user->id])) {
+                $userBalance = $balances[$user->id];
+                
+                \App\Models\WalletSnapshot::create([
+                    'expense_id' => $expenseId,
+                    'settlement_id' => $settlementId,
+                    'user_id' => $user->id,
+                    'net_balance' => $this->calculateNetBalance($userBalance),
+                    'owes_details' => $userBalance['owes'] ?? [],
+                    'receives_details' => $userBalance['owed_by'] ?? [],
+                    'snapshot_date' => now(),
+                ]);
+            }
+        }
+    }
+
+    private function calculateNetBalance($userBalance)
+    {
+        $netBalance = 0;
+        
+        // Subtract what user owes
+        foreach ($userBalance['owes'] ?? [] as $amount) {
+            $netBalance -= $amount;
+        }
+        
+        // Add what user is owed
+        foreach ($userBalance['owed_by'] ?? [] as $amount) {
+            $netBalance += $amount;
+        }
+        
+        return $netBalance;
+    }
+
+    public function getWalletSnapshots()
+    {
+        $snapshots = \App\Models\WalletSnapshot::with(['user', 'expense', 'settlement'])
+            ->orderBy('snapshot_date')
+            ->get()
+            ->groupBy('snapshot_date');
+
+        return response()->json($snapshots);
+    }
+
+    private function getWalletSnapshotFromDB($expenseId = null, $settlementId = null)
+    {
+        $query = \App\Models\WalletSnapshot::with('user');
+        
+        if ($expenseId) {
+            $query->where('expense_id', $expenseId);
+        }
+        
+        if ($settlementId) {
+            $query->where('settlement_id', $settlementId);
+        }
+        
+        $snapshots = $query->get();
+        
+        // Convert to the format expected by the view
+        $walletBalances = [];
+        foreach ($snapshots as $snapshot) {
+            $walletBalances[$snapshot->user_id] = [
+                'user_id' => $snapshot->user_id,
+                'user_name' => $snapshot->user->name,
+                'owes' => $snapshot->owes_details ?? [],
+                'receives' => $snapshot->receives_details ?? [],
+                'net_balance' => $snapshot->net_balance
+            ];
+        }
+        
+        return $walletBalances;
     }
 }
