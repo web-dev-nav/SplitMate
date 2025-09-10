@@ -7,6 +7,7 @@ use App\Models\ExpensePayback;
 use App\Models\Settlement;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 
 class ExpenseController extends Controller
@@ -36,78 +37,107 @@ class ExpenseController extends Controller
             
             $validated = $request->validate([
                 'description' => 'required|string|max:255',
-                'amount' => 'required|numeric|min:0.01',
+                'amount' => 'required|numeric|min:0.01|max:999999.99',
                 'paid_by_user_id' => 'required|exists:users,id',
-                'expense_date' => 'required|date',
+                'expense_date' => 'required|date|before_or_equal:today',
                 'receipt_photo' => 'required|image|max:2048',
             ], [
                 'receipt_photo.required' => 'Please upload a receipt photo. This is required for expense tracking.',
                 'receipt_photo.image' => 'The receipt must be an image file (JPG, PNG, GIF, etc.).',
                 'receipt_photo.max' => 'The receipt image must be smaller than 2MB.',
+                'amount.max' => 'The expense amount cannot exceed $999,999.99.',
+                'expense_date.before_or_equal' => 'The expense date cannot be in the future.',
             ]);
 
             $validated['receipt_photo'] = $request->file('receipt_photo')->store('receipts', 'public');
 
-            // Set the user count at the time of expense creation
-            $validated['user_count_at_time'] = User::count();
+            // Use database transaction to ensure data consistency
+            $expense = DB::transaction(function () use ($validated) {
+                // Set the user count and participant IDs at the time of expense creation
+                $users = User::where('is_active', true)->get();
+                
+                // Validate minimum user count
+                if ($users->count() < 2) {
+                    throw new \InvalidArgumentException('At least 2 active users are required to create an expense.');
+                }
+                
+                $validated['user_count_at_time'] = $users->count();
+                $validated['participant_ids'] = $users->pluck('id')->toArray();
 
-            // Create the expense
-            $expense = Expense::create($validated);
+                // Create the expense
+                $expense = Expense::create($validated);
 
-            // Store wallet snapshot after expense
-            $users = User::where('is_active', true)->get();
-            $this->storeWalletSnapshot($expense->id, null, $users);
+                // Store wallet snapshot after expense
+                $this->storeWalletSnapshot($expense->id, null, $users);
+
+                return $expense;
+            });
 
             $message = 'Expense added successfully!';
 
             return redirect()->back()->with('success', $message);
+        } catch (\InvalidArgumentException $e) {
+            return redirect()->back()->withErrors(['general' => $e->getMessage()])->withInput();
         } catch (\Exception $e) {
+            \Log::error('Expense creation error: ' . $e->getMessage(), [
+                'request_data' => $request->all(),
+                'trace' => $e->getTraceAsString()
+            ]);
             return redirect()->back()->with('error', 'Error adding expense: ' . $e->getMessage());
         }
     }
 
     public function storeSettlement(Request $request)
     {
-        $validated = $request->validate([
-            'from_user_id' => 'required|exists:users,id',
-            'to_user_id' => 'required|exists:users,id|different:from_user_id',
-            'amount' => 'required|numeric|min:0.01',
-            'settlement_date' => 'required|date',
-            'payment_screenshot' => 'required|image|max:2048',
-        ], [
-            'payment_screenshot.required' => 'Please upload a payment screenshot. This is required to verify the settlement.',
-            'payment_screenshot.image' => 'The payment proof must be an image file (JPG, PNG, GIF, etc.).',
-            'payment_screenshot.max' => 'The payment screenshot must be smaller than 2MB.',
-        ]);
+        try {
+            $validated = $request->validate([
+                'from_user_id' => 'required|exists:users,id',
+                'to_user_id' => 'required|exists:users,id|different:from_user_id',
+                'amount' => 'required|numeric|min:0.01',
+                'settlement_date' => 'required|date',
+                'payment_screenshot' => 'required|image|max:2048',
+            ], [
+                'payment_screenshot.required' => 'Please upload a payment screenshot. This is required to verify the settlement.',
+                'payment_screenshot.image' => 'The payment proof must be an image file (JPG, PNG, GIF, etc.).',
+                'payment_screenshot.max' => 'The payment screenshot must be smaller than 2MB.',
+            ]);
 
-        // Check if the payment amount exceeds what the user actually owes
-        $balances = $this->calculateBalances();
-        $fromUserId = $validated['from_user_id'];
-        $toUserId = $validated['to_user_id'];
-        $paymentAmount = $validated['amount'];
+            $validated['payment_screenshot'] = $request->file('payment_screenshot')->store('payment-screenshots', 'public');
 
-        // Get the current debt amount from the balances structure
-        $currentDebt = 0;
-        if (isset($balances[$fromUserId]['owes'][$toUserId])) {
-            $currentDebt = $balances[$fromUserId]['owes'][$toUserId];
+            // Use database transaction to prevent race conditions
+            $settlement = DB::transaction(function () use ($validated) {
+                // Check if the payment amount exceeds what the user actually owes
+                $balances = $this->calculateBalances();
+                $fromUserId = $validated['from_user_id'];
+                $toUserId = $validated['to_user_id'];
+                $paymentAmount = $validated['amount'];
+
+                // Get the current debt amount from the balances structure
+                $currentDebt = 0;
+                if (isset($balances[$fromUserId]['owes'][$toUserId])) {
+                    $currentDebt = $balances[$fromUserId]['owes'][$toUserId];
+                }
+
+                // If the payment amount exceeds the debt, throw an exception
+                if ($paymentAmount > $currentDebt) {
+                    throw new \InvalidArgumentException("You can only pay up to $" . number_format($currentDebt, 2) . " (the amount you currently owe).");
+                }
+
+                $settlement = Settlement::create($validated);
+
+                // Store wallet snapshot after settlement
+                $users = User::where('is_active', true)->get();
+                $this->storeWalletSnapshot(null, $settlement->id, $users);
+
+                return $settlement;
+            });
+
+            return redirect()->back()->with('success', 'Settlement recorded successfully!');
+        } catch (\InvalidArgumentException $e) {
+            return redirect()->back()->withErrors(['amount' => $e->getMessage()])->withInput();
+        } catch (\Exception $e) {
+            return redirect()->back()->with('error', 'Error recording settlement: ' . $e->getMessage());
         }
-
-        // If the payment amount exceeds the debt, return an error
-        if ($paymentAmount > $currentDebt) {
-            return redirect()->back()->withErrors([
-                'amount' => "You can only pay up to $" . number_format($currentDebt, 2) . " (the amount you currently owe)."
-            ])->withInput();
-        }
-
-        $validated['payment_screenshot'] = $request->file('payment_screenshot')->store('payment-screenshots', 'public');
-
-        $settlement = Settlement::create($validated);
-
-        // Store wallet snapshot after settlement
-        $users = User::where('is_active', true)->get();
-        $this->storeWalletSnapshot(null, $settlement->id, $users);
-
-        return redirect()->back()->with('success', 'Settlement recorded successfully!');
     }
 
     private function calculateBalances()
@@ -134,7 +164,12 @@ class ExpenseController extends Controller
             $paidBy = $expense->paid_by_user_id;
 
             // Get only the users who existed when this expense was created
-            $usersAtTime = $users->take($totalUsers);
+            if ($expense->participant_ids && count($expense->participant_ids) > 0) {
+                $usersAtTime = User::whereIn('id', $expense->participant_ids)->get();
+            } else {
+                // Fallback for old expenses without participant_ids
+                $usersAtTime = $users->take($totalUsers);
+            }
 
             // Split expense among users who existed at the time (normal splitting) FIRST
             foreach ($usersAtTime as $user) {
@@ -145,8 +180,10 @@ class ExpenseController extends Controller
                 }
             }
 
-            // If the person who paid has debts, automatically reduce them by their share
-            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $perPerson, $usersAtTime);
+            // If the person who paid has debts, automatically reduce them by the amount others owe them
+            // This is the correct logic: only use the money that others owe the payer for debt reduction
+            $amountOthersOwe = $perPerson * (count($usersAtTime) - 1); // Total amount others owe the payer
+            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $amountOthersOwe, $usersAtTime);
         }
 
         // Process settlements
@@ -210,7 +247,12 @@ class ExpenseController extends Controller
             $paidBy = $expense->paid_by_user_id;
 
             // Get only the users who existed when this expense was created
-            $usersAtTime = $users->take($totalUsers);
+            if ($expense->participant_ids && count($expense->participant_ids) > 0) {
+                $usersAtTime = User::whereIn('id', $expense->participant_ids)->get();
+            } else {
+                // Fallback for old expenses without participant_ids
+                $usersAtTime = $users->take($totalUsers);
+            }
 
             // Split expense among users who existed at the time (normal splitting) FIRST
             foreach ($usersAtTime as $user) {
@@ -221,8 +263,10 @@ class ExpenseController extends Controller
                 }
             }
 
-            // If the person who paid has debts, automatically reduce them by their share
-            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $perPerson, $usersAtTime);
+            // If the person who paid has debts, automatically reduce them by the amount others owe them
+            // This is the correct logic: only use the money that others owe the payer for debt reduction
+            $amountOthersOwe = $perPerson * (count($usersAtTime) - 1); // Total amount others owe the payer
+            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $amountOthersOwe, $usersAtTime);
         }
 
         // Process settlements
@@ -299,7 +343,8 @@ class ExpenseController extends Controller
             
             // Calculate debt reductions for the payer
             if (isset($debtsBefore[$paidBy])) {
-                $remainingAmount = $perPerson;
+                // Only use the amount that others owe the payer for debt reduction
+                $remainingAmount = $perPerson * (count($users) - 1); // Total amount others owe the payer
                 
                 // Sort debts by amount (highest first)
                 $sortedDebts = $debtsBefore[$paidBy];
@@ -361,7 +406,12 @@ class ExpenseController extends Controller
             $paidBy = $expense->paid_by_user_id;
 
             // Get only the users who existed when this expense was created
-            $usersAtTime = $users->take($totalUsers);
+            if ($expense->participant_ids && count($expense->participant_ids) > 0) {
+                $usersAtTime = User::whereIn('id', $expense->participant_ids)->get();
+            } else {
+                // Fallback for old expenses without participant_ids
+                $usersAtTime = $users->take($totalUsers);
+            }
 
             // Split expense among users who existed at the time FIRST
             foreach ($usersAtTime as $user) {
@@ -372,7 +422,9 @@ class ExpenseController extends Controller
             }
 
             // Apply debt reduction logic to get the actual debts that existed
-            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $perPerson, $usersAtTime);
+            // Only use the amount that others owe the payer for debt reduction
+            $amountOthersOwe = $perPerson * (count($usersAtTime) - 1);
+            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $amountOthersOwe, $usersAtTime);
         }
 
         // Process settlements

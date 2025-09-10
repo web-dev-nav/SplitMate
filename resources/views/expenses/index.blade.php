@@ -336,7 +336,7 @@
                                                         <span class="font-semibold text-green-800">Total debt reduction: ${{ number_format(array_sum(array_column($details['debt_reductions'], 'reduction_amount')), 2) }}</span>
                                                     </div>
                                                     <p class="text-sm text-green-700">
-                                                        {{ $details['paid_by'] }}'s share of this expense (${{ number_format($details['per_person'], 2) }}) was automatically used to pay down existing debts.
+                                                        The amount others owe {{ $details['paid_by'] }} from this expense (${{ number_format($details['per_person'] * (count($details['normal_splits'])), 2) }}) was automatically used to pay down existing debts.
                                                     </p>
                                                 </div>
                                             </div>

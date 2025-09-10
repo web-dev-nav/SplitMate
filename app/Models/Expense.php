@@ -18,6 +18,7 @@ class Expense extends Model
         'payback_to_user_id',
         'payback_amount',
         'user_count_at_time',
+        'participant_ids',
     ];
 
     protected $casts = [
@@ -25,6 +26,7 @@ class Expense extends Model
         'amount' => 'decimal:2',
         'is_payback' => 'boolean',
         'payback_amount' => 'decimal:2',
+        'participant_ids' => 'array',
     ];
 
     public function paidByUser(): BelongsTo
