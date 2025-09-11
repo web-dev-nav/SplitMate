@@ -138,17 +138,20 @@
                 </div>
 
                 <div class="flex gap-3">
-                    <div class="flex-1">
+                    <div class="flex-1 min-h-[80px]">
                         <input type="number" name="amount" step="0.01" min="0.01" required 
                                class="w-full text-lg border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-green-500"
                                placeholder="Amount paid back">
-                        <div id="max-amount-hint" class="text-xs text-gray-500 mt-1 hidden">
+                        <div id="max-amount-hint" class="text-xs text-gray-500 mt-1 h-4 hidden">
                             Maximum: $<span id="max-amount-value">0.00</span>
                         </div>
                     </div>
-                    <input type="date" name="settlement_date" required 
-                           class="flex-1 text-lg border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-green-500"
-                           value="{{ date('Y-m-d') }}">
+                    <div class="flex-1 min-h-[80px]">
+                        <input type="date" name="settlement_date" required 
+                               class="w-full text-lg border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-green-500"
+                               value="{{ date('Y-m-d') }}">
+                        <div class="h-4"></div> <!-- Spacer to match the hint height -->
+                    </div>
                 </div>
 
                 <div>
@@ -230,9 +233,11 @@
                                 </div>
                                 <p class="text-gray-600">
                                     Paid by {{ $expense->paidByUser->name }} • {{ $expense->expense_date->format('M d, Y') }}
-                                    @if($expense->receipt_photo)
+                                    @if($expense->receipt_photo && file_exists(public_path('uploads/' . $expense->receipt_photo)))
                                         • <a href="/uploads/{{ $expense->receipt_photo }}" target="_blank" 
                                              class="text-blue-600 hover:underline">📷 Receipt</a>
+                                    @elseif($expense->receipt_photo)
+                                        • <span class="text-gray-400">📷 Receipt (missing)</span>
                                     @endif
                                     <br><span class="text-xs text-gray-500">Added {{ $expense->created_at->diffForHumans() }}</span>
                                 </p>
@@ -449,9 +454,11 @@
                                 </p>
                                 <p class="text-gray-600">
                                     {{ $settlement->settlement_date->format('M d, Y') }}
-                                    @if($settlement->payment_screenshot)
+                                    @if($settlement->payment_screenshot && file_exists(public_path('uploads/' . $settlement->payment_screenshot)))
                                         • <a href="/uploads/{{ $settlement->payment_screenshot }}" target="_blank" 
                                              class="text-green-600 hover:underline">📷 Payment Proof</a>
+                                    @elseif($settlement->payment_screenshot)
+                                        • <span class="text-gray-400">📷 Payment Proof (missing)</span>
                                     @endif
                                     <br><span class="text-xs text-gray-500">Recorded {{ $settlement->created_at->diffForHumans() }}</span>
                                 </p>
@@ -459,7 +466,7 @@
                             <p class="font-bold text-xl text-green-600">${{ number_format($settlement->amount, 2) }}</p>
                         </div>
                         
-                        @if($settlement->payment_screenshot)
+                        @if($settlement->payment_screenshot && file_exists(public_path('uploads/' . $settlement->payment_screenshot)))
                             <div class="mt-3 p-3 bg-white rounded-lg border border-green-200">
                                 <div class="flex items-center gap-2 mb-2">
                                     <span class="text-green-600">📸</span>
@@ -469,9 +476,21 @@
                                    class="block">
                                     <img src="/uploads/{{ $settlement->payment_screenshot }}" 
                                          alt="Payment Screenshot" 
-                                         class="w-full max-w-xs h-32 object-cover rounded-lg border border-gray-200 hover:opacity-80 transition-opacity">
+                                         class="w-full max-w-xs h-32 object-cover rounded-lg border border-gray-200 hover:opacity-80 transition-opacity"
+                                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                                    <div style="display:none;" class="w-full max-w-xs h-32 bg-gray-100 rounded-lg border border-gray-200 flex items-center justify-center text-gray-500 text-sm">
+                                        Image not found
+                                    </div>
                                 </a>
                                 <p class="text-xs text-gray-500 mt-1">Click to view full size</p>
+                            </div>
+                        @elseif($settlement->payment_screenshot)
+                            <div class="mt-3 p-3 bg-yellow-50 rounded-lg border border-yellow-200">
+                                <div class="flex items-center gap-2 mb-2">
+                                    <span class="text-yellow-600">⚠️</span>
+                                    <span class="text-sm font-medium text-gray-700">Payment Screenshot Missing</span>
+                                </div>
+                                <p class="text-xs text-gray-500">The payment screenshot file could not be found.</p>
                             </div>
                         @endif
                     </div>
