@@ -231,7 +231,7 @@
                                 <p class="text-gray-600">
                                     Paid by {{ $expense->paidByUser->name }} • {{ $expense->expense_date->format('M d, Y') }}
                                     @if($expense->receipt_photo)
-                                        • <a href="{{ Storage::url($expense->receipt_photo) }}" target="_blank" 
+                                        • <a href="/uploads/{{ $expense->receipt_photo }}" target="_blank" 
                                              class="text-blue-600 hover:underline">📷 Receipt</a>
                                     @endif
                                     <br><span class="text-xs text-gray-500">Added {{ $expense->created_at->diffForHumans() }}</span>
@@ -450,7 +450,7 @@
                                 <p class="text-gray-600">
                                     {{ $settlement->settlement_date->format('M d, Y') }}
                                     @if($settlement->payment_screenshot)
-                                        • <a href="{{ Storage::url($settlement->payment_screenshot) }}" target="_blank" 
+                                        • <a href="/uploads/{{ $settlement->payment_screenshot }}" target="_blank" 
                                              class="text-green-600 hover:underline">📷 Payment Proof</a>
                                     @endif
                                     <br><span class="text-xs text-gray-500">Recorded {{ $settlement->created_at->diffForHumans() }}</span>
@@ -465,9 +465,9 @@
                                     <span class="text-green-600">📸</span>
                                     <span class="text-sm font-medium text-gray-700">Payment Screenshot</span>
                                 </div>
-                                <a href="{{ Storage::url($settlement->payment_screenshot) }}" target="_blank" 
+                                <a href="/uploads/{{ $settlement->payment_screenshot }}" target="_blank" 
                                    class="block">
-                                    <img src="{{ Storage::url($settlement->payment_screenshot) }}" 
+                                    <img src="/uploads/{{ $settlement->payment_screenshot }}" 
                                          alt="Payment Screenshot" 
                                          class="w-full max-w-xs h-32 object-cover rounded-lg border border-gray-200 hover:opacity-80 transition-opacity">
                                 </a>
