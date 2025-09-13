@@ -179,6 +179,17 @@
                     <div id="payment-status" class="text-sm mt-1 text-gray-500">No file selected</div>
                 </div>
 
+                <!-- Payment Preview -->
+                <div id="payment-preview" class="hidden bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
+                    <div class="flex items-center gap-2 mb-3">
+                        <span class="text-blue-600">🔮</span>
+                        <span class="font-semibold text-blue-800">Payment Preview</span>
+                    </div>
+                    <div id="preview-content" class="text-sm text-blue-700">
+                        <!-- Preview content will be populated by JavaScript -->
+                    </div>
+                </div>
+
                     <button type="submit" 
                         class="w-full bg-green-500 text-white text-lg font-semibold py-3 rounded-xl hover:bg-green-600 transition-colors">
                     💳 Record Settlement
@@ -341,7 +352,7 @@
                                                         <span class="font-semibold text-green-800">Total debt reduction: ${{ number_format(array_sum(array_column($details['debt_reductions'], 'reduction_amount')), 2) }}</span>
                                                     </div>
                                                     <p class="text-sm text-green-700">
-                                                        The amount others owe {{ $details['paid_by'] }} from this expense (${{ number_format($details['per_person'] * (count($details['normal_splits'])), 2) }}) was automatically used to pay down existing debts.
+                                                        The amount others owe {{ $details['paid_by'] }} from this expense (${{ number_format($details['per_person'] * (count($details['normal_splits'])), 2) }}) was automatically used to pay down existing debts. ({{ $details['paid_by'] }}'s own share of ${{ number_format($details['per_person'], 2) }} is not included as they paid for themselves.)
                                                     </p>
                                                 </div>
                                             </div>
@@ -363,10 +374,10 @@
                                         </div>
                                     @endif
 
-                                    <!-- Step 4: Wallet Balance Snapshot -->
+                                    <!-- Step 5: Wallet Balance Snapshot -->
                                     @if(isset($details['wallet_snapshot']) && count($details['wallet_snapshot']) > 0)
                                         <div class="mb-4">
-                                            <h6 class="font-bold text-gray-800 mb-3">Step 4: Wallet balance snapshot after this transaction</h6>
+                                            <h6 class="font-bold text-gray-800 mb-3">Step 5: Wallet balance snapshot after this transaction</h6>
                                             <div class="ml-4">
                                                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                                                     @foreach($details['wallet_snapshot'] as $userId => $wallet)
@@ -464,6 +475,114 @@
                                 </p>
                             </div>
                             <p class="font-bold text-xl text-green-600">${{ number_format($settlement->amount, 2) }}</p>
+                        </div>
+
+                        <!-- Settlement Breakdown -->
+                        <div class="bg-white rounded-lg border border-green-200 mt-4">
+                            <button onclick="toggleSettlementBreakdown({{ $settlement->id }})" 
+                                    class="w-full p-4 text-left font-semibold text-gray-800 flex items-center justify-between hover:bg-gray-50 transition-colors border-b border-gray-200">
+                                <div class="flex items-center gap-2">
+                                    <span class="text-green-600">📊</span> Payment Breakdown
+                                    <span class="text-xs text-gray-500 font-normal">(Click to expand)</span>
+                                </div>
+                                <span id="settlement-breakdown-icon-{{ $settlement->id }}" class="text-gray-500 transform transition-transform duration-200">▼</span>
+                            </button>
+                            
+                            <div id="settlement-breakdown-content-{{ $settlement->id }}" class="hidden px-4 pb-4">
+                                <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 font-mono text-sm">
+                                    @php
+                                        // Get pre-calculated settlement details
+                                        $details = $settlementDetails[$settlement->id] ?? null;
+                                        $currentDebt = $details['current_debt'] ?? 0;
+                                        $paymentAmount = $details['payment_amount'] ?? $settlement->amount;
+                                        $reduction = $details['reduction'] ?? 0;
+                                        $remainingDebt = $details['remaining_debt'] ?? 0;
+                                        $excessPayment = $details['excess_payment'] ?? 0;
+                                    @endphp
+                                    
+                                    <!-- Basic Information -->
+                                    <div class="mb-4">
+                                        <h6 class="font-bold text-gray-800 mb-2">Given:</h6>
+                                        <div class="ml-4 space-y-1">
+                                            <p>Payment Amount = <code class="bg-white px-2 py-1 rounded">${{ number_format($paymentAmount, 2) }}</code></p>
+                                            <p>Paid By = <code class="bg-white px-2 py-1 rounded">{{ $settlement->fromUser->name }}</code></p>
+                                            <p>Paid To = <code class="bg-white px-2 py-1 rounded">{{ $settlement->toUser->name }}</code></p>
+                                            <p>Date = <code class="bg-white px-2 py-1 rounded">{{ $settlement->settlement_date->format('M d, Y') }}</code></p>
+                                        </div>
+                                    </div>
+
+                                    <!-- Step 1: Debt before payment -->
+                                    <div class="mb-4">
+                                        <h6 class="font-bold text-gray-800 mb-2">Step 1: Debt before payment</h6>
+                                        <div class="ml-4">
+                                            <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                                                <p>{{ $settlement->fromUser->name }} owed {{ $settlement->toUser->name }} = <code class="bg-white px-2 py-1 rounded">${{ number_format($currentDebt, 2) }}</code></p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Step 2: Payment processing -->
+                                    <div class="mb-4">
+                                        <h6 class="font-bold text-gray-800 mb-2">Step 2: Payment processing</h6>
+                                        <div class="ml-4 space-y-3">
+                                            <div class="bg-green-50 border border-green-200 rounded-lg p-3">
+                                                <div class="flex items-center gap-2 mb-2">
+                                                    <span class="text-green-600 font-bold">💰</span>
+                                                    <span class="font-semibold text-green-800">Payment Details</span>
+                                                </div>
+                                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                                                    <div class="space-y-1">
+                                                        <p><span class="font-medium text-gray-600">Payment amount:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($paymentAmount, 2) }}</code></p>
+                                                        <p><span class="font-medium text-gray-600">Debt reduction:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($reduction, 2) }}</code></p>
+                                                    </div>
+                                                    <div class="space-y-1">
+                                                        <p><span class="font-medium text-gray-600">Calculation:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($currentDebt, 2) }}</code> - <code class="bg-white px-2 py-1 rounded border">${{ number_format($reduction, 2) }}</code></p>
+                                                        <p><span class="font-medium text-gray-600">Remaining debt:</span> <code class="bg-white px-2 py-1 rounded border font-bold {{ $remainingDebt > 0 ? 'text-red-600' : 'text-green-600' }}">${{ number_format($remainingDebt, 2) }}</code></p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Step 3: Result -->
+                                    <div class="mb-4">
+                                        <h6 class="font-bold text-gray-800 mb-2">Step 3: Result after payment</h6>
+                                        <div class="ml-4">
+                                            @if($remainingDebt > 0)
+                                                <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                                                    <div class="flex items-center gap-2 mb-2">
+                                                        <span class="text-yellow-600 font-bold">⚠️</span>
+                                                        <span class="font-semibold text-yellow-800">Partial Payment</span>
+                                                    </div>
+                                                    <p class="text-sm text-yellow-700">
+                                                        {{ $settlement->fromUser->name }} still owes {{ $settlement->toUser->name }} <strong>${{ number_format($remainingDebt, 2) }}</strong>
+                                                    </p>
+                                                </div>
+                                            @elseif($excessPayment > 0)
+                                                <div class="bg-orange-50 border border-orange-200 rounded-lg p-3">
+                                                    <div class="flex items-center gap-2 mb-2">
+                                                        <span class="text-orange-600 font-bold">🔄</span>
+                                                        <span class="font-semibold text-orange-800">Overpayment - Debt Reversal</span>
+                                                    </div>
+                                                    <p class="text-sm text-orange-700">
+                                                        {{ $settlement->toUser->name }} now owes {{ $settlement->fromUser->name }} <strong>${{ number_format($excessPayment, 2) }}</strong>
+                                                    </p>
+                                                </div>
+                                            @else
+                                                <div class="bg-green-50 border border-green-200 rounded-lg p-3">
+                                                    <div class="flex items-center gap-2 mb-2">
+                                                        <span class="text-green-600 font-bold">✅</span>
+                                                        <span class="font-semibold text-green-800">Debt Fully Paid</span>
+                                                    </div>
+                                                    <p class="text-sm text-green-700">
+                                                        {{ $settlement->fromUser->name }} and {{ $settlement->toUser->name }} are now settled up!
+                                                    </p>
+                                                </div>
+                                            @endif
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                         
                         @if($settlement->payment_screenshot && file_exists(public_path('uploads/' . $settlement->payment_screenshot)))
@@ -843,6 +962,80 @@
     // Store current balances for validation
     const currentBalances = @json($balances);
     
+    // Function to update payment preview
+    function updatePaymentPreview() {
+        const fromUserId = parseInt(fromUserSelect.value);
+        const toUserId = parseInt(toUserSelect.value);
+        const amount = parseFloat(amountInput.value) || 0;
+        const paymentPreview = document.getElementById('payment-preview');
+        const previewContent = document.getElementById('preview-content');
+        
+        if (fromUserId && toUserId && amount > 0) {
+            // Get current debt
+            let currentDebt = 0;
+            if (currentBalances[fromUserId] && currentBalances[fromUserId].owes && currentBalances[fromUserId].owes[toUserId]) {
+                currentDebt = currentBalances[fromUserId].owes[toUserId];
+            }
+            
+            // Get user names
+            const fromUserName = currentBalances[fromUserId]?.name || 'Unknown';
+            const toUserName = currentBalances[toUserId]?.name || 'Unknown';
+            
+            let previewHtml = '';
+            
+            if (currentDebt > 0) {
+                // Calculate new debt after payment
+                const newDebt = Math.max(0, currentDebt - amount);
+                const reduction = Math.min(amount, currentDebt);
+                
+                previewHtml = `
+                    <div class="space-y-2">
+                        <div class="flex justify-between items-center">
+                            <span class="font-medium">Current debt:</span>
+                            <span class="font-bold">$${currentDebt.toFixed(2)}</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="font-medium">Payment amount:</span>
+                            <span class="font-bold">$${amount.toFixed(2)}</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="font-medium">Debt reduction:</span>
+                            <span class="font-bold text-green-600">$${reduction.toFixed(2)}</span>
+                        </div>
+                        <hr class="border-blue-300">
+                        <div class="flex justify-between items-center">
+                            <span class="font-medium">Remaining debt:</span>
+                            <span class="font-bold ${newDebt > 0 ? 'text-red-600' : 'text-green-600'}">$${newDebt.toFixed(2)}</span>
+                        </div>
+                        ${newDebt === 0 ? '<div class="text-center mt-2"><span class="text-green-600 font-semibold">✅ Debt will be fully paid!</span></div>' : ''}
+                    </div>
+                `;
+            } else {
+                // No existing debt - will create new debt
+                previewHtml = `
+                    <div class="space-y-2">
+                        <div class="text-center text-blue-700">
+                            <p class="font-medium">${fromUserName} currently owes ${toUserName} <span class="font-bold">$0.00</span></p>
+                            <p class="text-sm mt-1">This payment will create a new debt:</p>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="font-medium">${toUserName} will owe ${fromUserName}:</span>
+                            <span class="font-bold text-orange-600">$${amount.toFixed(2)}</span>
+                        </div>
+                        <div class="text-center text-sm text-blue-600 mt-2">
+                            💡 This happens when someone pays more than they owe
+                        </div>
+                    </div>
+                `;
+            }
+            
+            previewContent.innerHTML = previewHtml;
+            paymentPreview.classList.remove('hidden');
+        } else {
+            paymentPreview.classList.add('hidden');
+        }
+    }
+    
     function validateSettlementAmount() {
         const fromUserId = parseInt(fromUserSelect.value);
         const toUserId = parseInt(toUserSelect.value);
@@ -889,9 +1082,18 @@
     }
     
     // Add event listeners for validation
-            if (fromUserSelect) fromUserSelect.addEventListener('change', validateSettlementAmount);
-            if (toUserSelect) toUserSelect.addEventListener('change', validateSettlementAmount);
-            if (amountInput) amountInput.addEventListener('input', validateSettlementAmount);
+            if (fromUserSelect) fromUserSelect.addEventListener('change', function() {
+                validateSettlementAmount();
+                updatePaymentPreview();
+            });
+            if (toUserSelect) toUserSelect.addEventListener('change', function() {
+                validateSettlementAmount();
+                updatePaymentPreview();
+            });
+            if (amountInput) amountInput.addEventListener('input', function() {
+                validateSettlementAmount();
+                updatePaymentPreview();
+            });
     
     // Prevent form submission if validation fails
             settlementFormForValidation.addEventListener('submit', function(e) {
@@ -916,6 +1118,22 @@
             icon.style.transform = 'rotate(0deg)';
         }
     }
+        }
+
+        // Toggle settlement breakdown visibility
+        window.toggleSettlementBreakdown = function(settlementId) {
+            const content = document.getElementById(`settlement-breakdown-content-${settlementId}`);
+            const icon = document.getElementById(`settlement-breakdown-icon-${settlementId}`);
+            
+            if (content && icon) {
+                if (content.classList.contains('hidden')) {
+                    content.classList.remove('hidden');
+                    icon.style.transform = 'rotate(180deg)';
+                } else {
+                    content.classList.add('hidden');
+                    icon.style.transform = 'rotate(0deg)';
+                }
+            }
         }
     }); // End of DOMContentLoaded
 </script>
