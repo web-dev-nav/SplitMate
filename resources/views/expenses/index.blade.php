@@ -10,7 +10,7 @@
             <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4" style="width: 100%; max-width: 100%; overflow-x: hidden;">
                 @if(count($balances) > 0)
                     @foreach($balances as $userId => $balance)
-                    <x-wallet-card :balance="$balance" :users="$users" />
+                    <x-wallet-card :balance="$balance" :users="$users" :userId="$userId" />
                     @endforeach
                 @else
                     <div class="col-span-3 text-center py-8">
@@ -352,7 +352,7 @@
                                                         <span class="font-semibold text-green-800">Total debt reduction: ${{ number_format(array_sum(array_column($details['debt_reductions'], 'reduction_amount')), 2) }}</span>
                                                     </div>
                                                     <p class="text-sm text-green-700">
-                                                        The amount others owe {{ $details['paid_by'] }} from this expense (${{ number_format($details['per_person'] * (count($details['normal_splits'])), 2) }}) was automatically used to pay down existing debts. ({{ $details['paid_by'] }}'s own share of ${{ number_format($details['per_person'], 2) }} is not included as they paid for themselves.)
+                                                        The amount others owe {{ $details['paid_by'] }} from this expense (${{ number_format($details['amount_others_owe_total'], 2) }}) was automatically used to pay down existing debts. ({{ $details['paid_by'] }}'s own share of ${{ number_format($details['per_person'], 2) }} is not included as they paid for themselves.)
                                                     </p>
                                                 </div>
                                             </div>
@@ -374,75 +374,92 @@
                                         </div>
                                     @endif
 
-                                    <!-- Step 5: Wallet Balance Snapshot -->
-                                    @if(isset($details['wallet_snapshot']) && count($details['wallet_snapshot']) > 0)
+                                    <!-- Step 5: Bank Statement Style Running Balance -->
+                                    @if(isset($details['wallet_snapshot_after']) && count($details['wallet_snapshot_after']) > 0)
                                         <div class="mb-4">
-                                            <h6 class="font-bold text-gray-800 mb-3">Step 5: Wallet balance snapshot after this transaction</h6>
+                                            <h6 class="font-bold text-gray-800 mb-3">Step 5: 🏦 Wallet Balance After This Transaction</h6>
                                             <div class="ml-4">
                                                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                                                    @foreach($details['wallet_snapshot'] as $userId => $wallet)
-                                                        <div class="bg-gradient-to-br from-purple-50 to-indigo-50 border-2 border-purple-200 rounded-xl p-4 shadow-sm hover:shadow-md transition-shadow">
-                                                            <!-- Wallet Header -->
-                                                            <div class="flex items-center justify-between mb-3">
-                                                                <div class="flex items-center gap-2">
-                                                                    <span class="text-2xl">💳</span>
-                                                                    <span class="font-bold text-purple-800">{{ $wallet['user_name'] }}</span>
-                                                                </div>
-                                                                <div class="text-right">
-                                                                    <span class="text-lg font-bold px-3 py-1 rounded-full {{ $wallet['net_balance'] >= 0 ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800' }}">
-                                                                        {{ $wallet['net_balance'] >= 0 ? '+' : '' }}${{ number_format($wallet['net_balance'], 2) }}
-                                                                    </span>
-                                                                    <p class="text-xs text-gray-500 mt-1">Net Balance</p>
+                                                    @foreach($details['wallet_snapshot_after'] as $userId => $walletAfter)
+                                                        @php
+                                                            $walletBefore = $details['wallet_snapshot_before'][$userId] ?? ['net_balance' => 0];
+                                                            $balanceChange = $walletAfter['net_balance'] - $walletBefore['net_balance'];
+                                                        @endphp
+                                                        <div class="bg-white border-2 border-gray-200 rounded-xl shadow-sm font-mono text-sm">
+                                                            <!-- Bank Statement Header -->
+                                                            <div class="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-4 py-3 rounded-t-xl">
+                                                                <div class="flex items-center justify-between">
+                                                                    <div class="flex items-center gap-2">
+                                                                        <span class="text-xl">💳</span>
+                                                                        <span class="font-bold">{{ $walletAfter['user_name'] }}</span>
+                                                                    </div>
+                                                                    <span class="text-xs opacity-75">Account Statement</span>
                                                                 </div>
                                                             </div>
-                                                            
-                                                            <!-- Owes Section -->
-                                                            @if(count($wallet['owes']) > 0)
-                                                                <div class="mb-3">
-                                                                    <div class="flex items-center gap-1 mb-2">
-                                                                        <span class="text-red-500">📤</span>
-                                                                        <span class="text-sm font-semibold text-red-700">Owes</span>
-                                                                    </div>
-                                                                    <div class="space-y-1">
-                                                                        @foreach($wallet['owes'] as $otherUserId => $amount)
-                                                                            <div class="bg-red-50 border border-red-200 rounded-lg p-2">
-                                                                                <div class="flex justify-between items-center">
-                                                                                    <span class="text-sm text-red-700">{{ $users->find($otherUserId)->name ?? 'Unknown' }}</span>
-                                                                                    <span class="font-bold text-red-800">${{ number_format($amount, 2) }}</span>
-                                                                                </div>
+
+                                                            <!-- Bank Statement Body -->
+                                                            <div class="p-4 space-y-3">
+                                                                <!-- Previous Balance -->
+                                                                <div class="flex justify-between items-center py-2 border-b border-gray-100">
+                                                                    <span class="text-gray-600">Previous Balance:</span>
+                                                                    <span class="font-bold {{ $walletBefore['net_balance'] >= 0 ? 'text-green-600' : 'text-red-600' }}">
+                                                                        {{ $walletBefore['net_balance'] >= 0 ? '+' : '' }}${{ number_format($walletBefore['net_balance'], 2) }}
+                                                                    </span>
+                                                                </div>
+
+                                                                <!-- Transaction Change -->
+                                                                <div class="flex justify-between items-center py-2 border-b border-gray-100">
+                                                                    <span class="text-gray-600">This Transaction:</span>
+                                                                    <span class="font-bold {{ $balanceChange >= 0 ? 'text-green-600' : 'text-red-600' }}">
+                                                                        {{ $balanceChange >= 0 ? '+' : '' }}${{ number_format($balanceChange, 2) }}
+                                                                    </span>
+                                                                </div>
+
+                                                                <!-- Running Balance (Current) -->
+                                                                <div class="flex justify-between items-center py-2 bg-gray-50 px-3 rounded-lg">
+                                                                    <span class="font-bold text-gray-800">Running Balance:</span>
+                                                                    <span class="text-lg font-bold {{ $walletAfter['net_balance'] >= 0 ? 'text-green-600' : 'text-red-600' }}">
+                                                                        {{ $walletAfter['net_balance'] >= 0 ? '+' : '' }}${{ number_format($walletAfter['net_balance'], 2) }}
+                                                                    </span>
+                                                                </div>
+
+                                                                <!-- Account Details -->
+                                                                @if(count($walletAfter['owes']) > 0 || count($walletAfter['receives']) > 0)
+                                                                    <div class="mt-4 pt-3 border-t border-gray-200">
+                                                                        <div class="text-xs text-gray-500 mb-2">Account Breakdown:</div>
+
+                                                                        @if(count($walletAfter['owes']) > 0)
+                                                                            <div class="space-y-1 mb-2">
+                                                                                @foreach($walletAfter['owes'] as $otherUserId => $amount)
+                                                                                    <div class="flex justify-between text-xs">
+                                                                                        <span class="text-red-600">Owes {{ $users->find($otherUserId)->name ?? 'Unknown' }}:</span>
+                                                                                        <span class="text-red-600">-${{ number_format($amount, 2) }}</span>
+                                                                                    </div>
+                                                                                @endforeach
                                                                             </div>
-                                                                        @endforeach
-                                                                    </div>
-                                                                </div>
-                                                            @endif
-                                                            
-                                                            <!-- Receives Section -->
-                                                            @if(count($wallet['receives']) > 0)
-                                                                <div class="mb-3">
-                                                                    <div class="flex items-center gap-1 mb-2">
-                                                                        <span class="text-green-500">📥</span>
-                                                                        <span class="text-sm font-semibold text-green-700">Will Receive</span>
-                                                                    </div>
-                                                                    <div class="space-y-1">
-                                                                        @foreach($wallet['receives'] as $otherUserId => $amount)
-                                                                            <div class="bg-green-50 border border-green-200 rounded-lg p-2">
-                                                                                <div class="flex justify-between items-center">
-                                                                                    <span class="text-sm text-green-700">{{ $users->find($otherUserId)->name ?? 'Unknown' }}</span>
-                                                                                    <span class="font-bold text-green-800">${{ number_format($amount, 2) }}</span>
-                                                                                </div>
+                                                                        @endif
+
+                                                                        @if(count($walletAfter['receives']) > 0)
+                                                                            <div class="space-y-1">
+                                                                                @foreach($walletAfter['receives'] as $otherUserId => $amount)
+                                                                                    <div class="flex justify-between text-xs">
+                                                                                        <span class="text-green-600">{{ $users->find($otherUserId)->name ?? 'Unknown' }} owes:</span>
+                                                                                        <span class="text-green-600">+${{ number_format($amount, 2) }}</span>
+                                                                                    </div>
+                                                                                @endforeach
                                                                             </div>
-                                                                        @endforeach
+                                                                        @endif
                                                                     </div>
-                                                                </div>
-                                                            @endif
-                                                            
-                                                            <!-- No Debts Message -->
-                                                            @if(count($wallet['owes']) == 0 && count($wallet['receives']) == 0)
-                                                                <div class="text-center py-4">
-                                                                    <span class="text-4xl">😊</span>
-                                                                    <p class="text-sm text-gray-500 mt-2">All settled up!</p>
-                                                                </div>
-                                                            @endif
+                                                                @endif
+
+                                                                <!-- All Settled Message -->
+                                                                @if(count($walletAfter['owes']) == 0 && count($walletAfter['receives']) == 0)
+                                                                    <div class="text-center py-3 mt-4 pt-3 border-t border-gray-200">
+                                                                        <span class="text-2xl">✅</span>
+                                                                        <p class="text-xs text-gray-500 mt-1">All settled up!</p>
+                                                                    </div>
+                                                                @endif
+                                                            </div>
                                                         </div>
                                                     @endforeach
                                                 </div>
@@ -1135,6 +1152,7 @@
                 }
             }
         }
+
     }); // End of DOMContentLoaded
 </script>
 @endpush

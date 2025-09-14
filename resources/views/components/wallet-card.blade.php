@@ -1,4 +1,4 @@
-@props(['balance', 'users'])
+@props(['balance', 'users', 'userId'])
 
 @php
     $totalOwed = array_sum($balance['owes']);
@@ -64,5 +64,13 @@
             @endif
         </div>
     @endif
+
+    <!-- Statement Link -->
+    <div class="mt-3 pt-2 border-t border-gray-200">
+        <a href="{{ route('statements.user', $userId) }}"
+           class="inline-flex items-center justify-center w-full px-3 py-2 text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 hover:border-blue-300 transition-colors">
+            🏦 View Statement
+        </a>
+    </div>
 </div>
 

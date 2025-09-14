@@ -3,7 +3,9 @@
     "allow": [
       "Bash(php artisan make:migration:*)",
       "Bash(php artisan make:model:*)",
-      "Bash(php artisan:*)"
+      "Bash(php artisan:*)",
+      "Bash(tree:*)",
+      "Bash(php:*)"
     ],
     "deny": [],
     "ask": []
