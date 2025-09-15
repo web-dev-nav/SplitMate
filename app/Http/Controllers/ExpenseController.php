@@ -335,9 +335,10 @@ class ExpenseController extends Controller
             }
 
             // Apply debt reduction logic to get the actual debts that existed
-            // Only use the amount that others owe the payer for debt reduction
-            $amountOthersOwe = $perPerson * (count($usersAtTime) - 1);
-            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $amountOthersOwe, $usersAtTime);
+            // Calculate expense amount in cents for precise reduction
+            $expenseAmountCents = round($expense->amount * 100);
+            $sortedUsers = $usersAtTime->sortBy('id');
+            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
         }
 
         // Process settlements with proper debt consolidation
@@ -380,9 +381,9 @@ class ExpenseController extends Controller
         return $debts;
     }
 
-    private function autoReduceDebtsForPayer(&$netBalances, $paidBy, $amountOthersOwe, $usersAtTime)
+    private function autoReduceDebtsForPayer(&$netBalances, $paidBy, $expenseAmountCents, $usersAtTime)
     {
-        // Find all debts the payer has to others
+        // Find all debts the payer owes to others (positive values in netBalances[$paidBy][$otherUser])
         $debtsToReduce = [];
         foreach ($usersAtTime as $user) {
             if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
@@ -394,39 +395,32 @@ class ExpenseController extends Controller
             return; // No debts to reduce
         }
 
-        // Sort debts by amount (highest first)
-        arsort($debtsToReduce);
+        // Calculate precise per-person amounts with remainder distribution
+        $participantCount = count($usersAtTime);
+        $perPersonCents = intval($expenseAmountCents / $participantCount);
+        $remainderCents = $expenseAmountCents % $participantCount;
 
-        // FINAL FIX: Use the straightforward per-person calculation
-        // If others owe $10 total and there are 2 others, each owes $5
-        $totalUsers = count($usersAtTime);
-        $numOthers = $totalUsers - 1; // Number of people who owe the payer
-        $perPersonAmount = $amountOthersOwe / $numOthers; // Direct calculation: $10/2 = $5
-        $perPersonCents = round($perPersonAmount * 100);
+        // Process debt reduction for each user with existing debt
+        $userIndex = 0;
+        foreach ($usersAtTime as $user) {
+            if ($user->id != $paidBy && isset($debtsToReduce[$user->id])) {
+                // Calculate how much this user owes the payer from this expense
+                $thisPersonAmountCents = $perPersonCents + ($userIndex < $remainderCents ? 1 : 0);
+                $thisPersonAmount = $thisPersonAmountCents / 100;
 
-        // Reduce each debt by the amount that specific user owes the payer
-        foreach ($debtsToReduce as $userId => $debtAmount) {
-            // Convert to cents for precise calculation
-            $debtCents = round($debtAmount * 100);
-            $reductionCents = min($debtCents, $perPersonCents);
-            $reductionAmount = $reductionCents / 100;
+                $existingDebt = $debtsToReduce[$user->id];
 
-            // Apply the debt reduction
-            $netBalances[$paidBy][$userId] -= $reductionAmount;
-            $netBalances[$userId][$paidBy] += $reductionAmount;
-
-            // FINAL FIX: Correct the balance discrepancy directly
-            // The debt calculation has a fundamental error causing $1.67 instead of $3.33
-            // Apply direct correction for the Lenovo case
-            if (abs($reductionAmount - 5.00) < 0.01 && $userId == 1 && $paidBy == 2) {
-                // This is Navjot(1) and Sapna(2) in the Lenovo transaction
-                $currentBalance = $netBalances[$paidBy][$userId]; // How much Sapna owes Navjot
-                if (abs($currentBalance - 1.67) < 0.01) {
-                    // Correct from $1.67 to $3.33
-                    $netBalances[$paidBy][$userId] = 3.33;
-                    $netBalances[$userId][$paidBy] = -3.33;
+                if ($thisPersonAmount >= $existingDebt) {
+                    // The expense share is enough to completely pay off the debt + create new debt
+                    $netBalances[$paidBy][$user->id] = 0; // Debt fully paid
+                    $netBalances[$user->id][$paidBy] = $thisPersonAmount - $existingDebt; // User now owes the difference
+                } else {
+                    // The expense share only partially pays off the debt
+                    $netBalances[$paidBy][$user->id] = $existingDebt - $thisPersonAmount; // Reduced debt
+                    $netBalances[$user->id][$paidBy] = 0; // User owes nothing
                 }
             }
+            $userIndex++;
         }
     }
 
@@ -554,9 +548,10 @@ class ExpenseController extends Controller
             }
 
             // Apply debt reduction logic to get the actual debts that existed
-            // Only use the amount that others owe the payer for debt reduction
-            $amountOthersOwe = $perPerson * (count($usersAtTime) - 1);
-            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $amountOthersOwe, $usersAtTime);
+            // Calculate expense amount in cents for precise reduction
+            $expenseAmountCents = round($expense->amount * 100);
+            $sortedUsers = $usersAtTime->sortBy('id');
+            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
         }
 
         // Process previous settlements with proper debt consolidation
@@ -746,10 +741,13 @@ class ExpenseController extends Controller
             $perPersonCents = intval($expenseAmountCents / $participantCount);
             $remainderCents = $expenseAmountCents % $participantCount;
 
+            // Sort users by ID to ensure consistent remainder distribution
+            $sortedUsers = $usersAtTime->sortBy('id');
+
             // Split expense among users who existed at the time (normal splitting) FIRST
             $userIndex = 0;
             $amountOthersOweCents = 0;
-            foreach ($usersAtTime as $user) {
+            foreach ($sortedUsers as $user) {
                 if ($user->id != $paidBy) {
                     // Add extra cent to first users if there's a remainder
                     $thisPersonAmountCents = $perPersonCents + ($userIndex < $remainderCents ? 1 : 0);
@@ -767,7 +765,7 @@ class ExpenseController extends Controller
 
             // Apply debt reduction if the payer has existing debts
             $hasExistingDebts = false;
-            foreach ($usersAtTime as $user) {
+            foreach ($sortedUsers as $user) {
                 if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
                     $hasExistingDebts = true;
                     break;
@@ -775,7 +773,7 @@ class ExpenseController extends Controller
             }
 
             if ($hasExistingDebts) {
-                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $amountOthersOwe, $usersAtTime);
+                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
             }
         }
 
@@ -805,17 +803,26 @@ class ExpenseController extends Controller
             }
         }
 
-        // FINAL PATCH: Fix the specific Sapna-Navjot balance issue
-        if (isset($netBalances[2][1]) && abs($netBalances[2][1] - 1.67) < 0.01) {
-            $netBalances[2][1] = 3.33;
-            $netBalances[1][2] = -3.33;
-        }
 
-        // ADDITIONAL PATCH: Fix the utilitsz debt reduction direction issue
-        // After utilitsz: Navjot owes Sapna ~$50, but should be Sapna owes Navjot ~$16.66
-        if (isset($netBalances[1][2]) && abs($netBalances[1][2] - 49.99) < 0.1) {
-            $netBalances[2][1] = 16.66; // Sapna owes Navjot
-            $netBalances[1][2] = -16.66; // Navjot is owed by Sapna
+        // Consolidate balances to prevent mutual debts
+        foreach ($users as $user1) {
+            foreach ($users as $user2) {
+                if ($user1->id < $user2->id) { // Process each pair only once
+                    $amount1to2 = $netBalances[$user1->id][$user2->id];
+                    $amount2to1 = $netBalances[$user2->id][$user1->id];
+
+                    if ($amount1to2 > 0 && $amount2to1 > 0) {
+                        // Both owe each other - consolidate
+                        if ($amount1to2 >= $amount2to1) {
+                            $netBalances[$user1->id][$user2->id] = $amount1to2 - $amount2to1;
+                            $netBalances[$user2->id][$user1->id] = 0;
+                        } else {
+                            $netBalances[$user2->id][$user1->id] = $amount2to1 - $amount1to2;
+                            $netBalances[$user1->id][$user2->id] = 0;
+                        }
+                    }
+                }
+            }
         }
 
         // Convert to display format
@@ -885,17 +892,18 @@ class ExpenseController extends Controller
             }
 
             // Apply debt reduction if needed
-            $amountOthersOwe = $perPerson * (count($usersAtTime) - 1);
+            $expenseAmountCents = round($exp->amount * 100);
+            $sortedUsers = $usersAtTime->sortBy('id');
             $hasExistingDebts = false;
-            foreach ($usersAtTime as $user) {
+            foreach ($sortedUsers as $user) {
                 if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
                     $hasExistingDebts = true;
                     break;
                 }
             }
-            
+
             if ($hasExistingDebts) {
-                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $amountOthersOwe, $usersAtTime);
+                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
             }
         }
 
@@ -1001,9 +1009,10 @@ class ExpenseController extends Controller
             }
 
             // Apply debt reduction if needed
-            $amountOthersOwe = $perPerson * (count($usersAtTime) - 1);
+            $expenseAmountCents = round($exp->amount * 100);
+            $sortedUsers = $usersAtTime->sortBy('id');
             $hasExistingDebts = false;
-            foreach ($usersAtTime as $user) {
+            foreach ($sortedUsers as $user) {
                 if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
                     $hasExistingDebts = true;
                     break;
@@ -1011,7 +1020,7 @@ class ExpenseController extends Controller
             }
 
             if ($hasExistingDebts) {
-                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $amountOthersOwe, $usersAtTime);
+                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
             }
         }
 
@@ -1037,16 +1046,25 @@ class ExpenseController extends Controller
             }
         }
 
-        // APPLY THE SAME PATCH: Fix the specific Sapna-Navjot balance issue
-        if (isset($netBalances[2][1]) && abs($netBalances[2][1] - 1.67) < 0.01) {
-            $netBalances[2][1] = 3.33;
-            $netBalances[1][2] = -3.33;
-        }
+        // Consolidate balances to prevent mutual debts
+        foreach ($users as $user1) {
+            foreach ($users as $user2) {
+                if ($user1->id < $user2->id) { // Process each pair only once
+                    $amount1to2 = $netBalances[$user1->id][$user2->id];
+                    $amount2to1 = $netBalances[$user2->id][$user1->id];
 
-        // ADDITIONAL PATCH: Fix the utilitsz debt reduction direction issue
-        if (isset($netBalances[1][2]) && abs($netBalances[1][2] - 49.99) < 0.1) {
-            $netBalances[2][1] = 16.66; // Sapna owes Navjot
-            $netBalances[1][2] = -16.66; // Navjot is owed by Sapna
+                    if ($amount1to2 > 0 && $amount2to1 > 0) {
+                        // Both owe each other - consolidate
+                        if ($amount1to2 >= $amount2to1) {
+                            $netBalances[$user1->id][$user2->id] = $amount1to2 - $amount2to1;
+                            $netBalances[$user2->id][$user1->id] = 0;
+                        } else {
+                            $netBalances[$user2->id][$user1->id] = $amount2to1 - $amount1to2;
+                            $netBalances[$user1->id][$user2->id] = 0;
+                        }
+                    }
+                }
+            }
         }
 
         // Convert to wallet snapshot format
@@ -1145,9 +1163,9 @@ class ExpenseController extends Controller
             }
 
             // Apply debt reduction if needed
-            $amountOthersOwe = $amountOthersOweCents / 100;
+            $sortedUsers = $usersAtTime->sortBy('id');
             $hasExistingDebts = false;
-            foreach ($usersAtTime as $user) {
+            foreach ($sortedUsers as $user) {
                 if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
                     $hasExistingDebts = true;
                     break;
@@ -1155,7 +1173,7 @@ class ExpenseController extends Controller
             }
 
             if ($hasExistingDebts) {
-                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $amountOthersOwe, $usersAtTime);
+                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
             }
         }
 
@@ -1304,9 +1322,9 @@ class ExpenseController extends Controller
             }
 
             // Apply debt reduction if needed
-            $amountOthersOwe = $amountOthersOweCents / 100;
+            $sortedUsers = $usersAtTime->sortBy('id');
             $hasExistingDebts = false;
-            foreach ($usersAtTime as $user) {
+            foreach ($sortedUsers as $user) {
                 if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
                     $hasExistingDebts = true;
                     break;
@@ -1314,7 +1332,7 @@ class ExpenseController extends Controller
             }
 
             if ($hasExistingDebts) {
-                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $amountOthersOwe, $usersAtTime);
+                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
             }
         }
 
@@ -1337,6 +1355,27 @@ class ExpenseController extends Controller
             } else {
                 $netBalances[$toId][$fromId] += $amount;
                 $netBalances[$fromId][$toId] -= $amount;
+            }
+        }
+
+        // Consolidate balances to prevent mutual debts
+        foreach ($users as $user1) {
+            foreach ($users as $user2) {
+                if ($user1->id < $user2->id) { // Process each pair only once
+                    $amount1to2 = $netBalances[$user1->id][$user2->id];
+                    $amount2to1 = $netBalances[$user2->id][$user1->id];
+
+                    if ($amount1to2 > 0 && $amount2to1 > 0) {
+                        // Both owe each other - consolidate
+                        if ($amount1to2 >= $amount2to1) {
+                            $netBalances[$user1->id][$user2->id] = $amount1to2 - $amount2to1;
+                            $netBalances[$user2->id][$user1->id] = 0;
+                        } else {
+                            $netBalances[$user2->id][$user1->id] = $amount2to1 - $amount1to2;
+                            $netBalances[$user1->id][$user2->id] = 0;
+                        }
+                    }
+                }
             }
         }
 

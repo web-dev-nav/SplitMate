@@ -225,8 +225,8 @@
                     ]);
                 }
                 
-                // Sort by creation time descending (most recent activity first)
-                $allTransactions = $allTransactions->sortByDesc('created_at');
+                // Sort by creation time ascending (chronological order, oldest first for logical debt flow)
+                $allTransactions = $allTransactions->sortBy('created_at');
             @endphp
 
             @forelse($allTransactions as $transaction)
@@ -273,124 +273,62 @@
                                 
                                 <div id="breakdown-content-{{ $expense->id }}" class="hidden px-4 pb-4">
                                 
-                                <!-- Mathematical Breakdown -->
-                                <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 font-mono text-sm">
-                                    
-                                    <!-- Basic Information -->
-                                    <div class="mb-4">
-                                        <h6 class="font-bold text-gray-800 mb-2">Given:</h6>
-                                        <div class="ml-4 space-y-1">
-                                            <p>Total Amount = <code class="bg-white px-2 py-1 rounded">${{ number_format($details['amount'], 2) }}</code></p>
-                                            <p>Number of People = <code class="bg-white px-2 py-1 rounded">{{ count($details['normal_splits']) + 1 }}</code></p>
-                                            <p>Paid By = <code class="bg-white px-2 py-1 rounded">{{ $details['paid_by'] }}</code></p>
-                                        </div>
+                                <!-- Simplified Breakdown -->
+                                <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 text-sm">
+
+                                    <!-- Summary -->
+                                    <div class="mb-4 text-center">
+                                        <p class="text-lg font-semibold text-gray-800">
+                                            ${{ number_format($details['amount'], 2) }} ÷ {{ count($details['normal_splits']) + 1 }} people = ${{ number_format($details['per_person'], 2) }} each
+                                        </p>
+                                        <p class="text-gray-600">Paid by {{ $details['paid_by'] }}</p>
                                     </div>
 
-                                    <!-- Step 1: Calculate per person amount -->
+                                    <!-- Who Owes What -->
                                     <div class="mb-4">
-                                        <h6 class="font-bold text-gray-800 mb-2">Step 1: Calculate per person amount</h6>
-                                        <div class="ml-4">
-                                            <p>Per Person = Total Amount ÷ Number of People</p>
-                                            <p>Per Person = <code class="bg-white px-2 py-1 rounded">${{ number_format($details['amount'], 2) }}</code> ÷ <code class="bg-white px-2 py-1 rounded">{{ count($details['normal_splits']) + 1 }}</code></p>
-                                            <p>Per Person = <code class="bg-white px-2 py-1 rounded">${{ number_format($details['per_person'], 2) }}</code></p>
-                                        </div>
-                                    </div>
-
-                                    <!-- Step 2: Normal split -->
-                                    <div class="mb-4">
-                                        <h6 class="font-bold text-gray-800 mb-2">Step 2: Normal expense split</h6>
+                                        <h6 class="font-bold text-gray-800 mb-2">💸 Amount Owed</h6>
                                         <div class="ml-4 space-y-1">
                                             @foreach($details['normal_splits'] as $split)
-                                                <p>{{ $split['user_name'] }} owes {{ $details['paid_by'] }} = <code class="bg-white px-2 py-1 rounded">${{ number_format($split['owes_amount'], 2) }}</code></p>
+                                                <div class="flex justify-between">
+                                                    <span>{{ $split['user_name'] }} owes {{ $details['paid_by'] }}</span>
+                                                    <span class="font-bold">${{ number_format($split['owes_amount'], 2) }}</span>
+                                                </div>
                                             @endforeach
-                                            <p>{{ $details['paid_by'] }}'s share = <code class="bg-white px-2 py-1 rounded">${{ number_format($details['per_person'], 2) }}</code> (covered by paying)</p>
                                         </div>
                                     </div>
 
-                                    <!-- Step 3: Debt reduction -->
+                                    <!-- Debt Reduction -->
                                     @if(count($details['debt_reductions']) > 0)
                                         <div class="mb-4">
-                                            <h6 class="font-bold text-gray-800 mb-2">Step 3: Automatic debt reduction</h6>
-                                            <div class="ml-4 space-y-3">
+                                            <h6 class="font-bold text-gray-800 mb-2">🔄 Debt Reduction Applied</h6>
+                                            <div class="ml-4 space-y-2">
                                                 @foreach($details['debt_reductions'] as $reduction)
                                                     <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                                                        <div class="flex items-center gap-2 mb-2">
-                                                            <span class="text-blue-600 font-bold">🔄</span>
-                                                            <span class="font-semibold text-blue-800">{{ $details['paid_by'] }} → {{ $reduction['user_name'] }} debt reduction</span>
+                                                        <div class="flex justify-between items-center">
+                                                            <span class="font-semibold">{{ $details['paid_by'] }} ↔ {{ $reduction['user_name'] }}</span>
+                                                            <span class="font-bold text-green-600">-${{ number_format($reduction['reduction_amount'], 2) }}</span>
                                                         </div>
-                                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                                                            <div class="space-y-1">
-                                                                <p><span class="font-medium text-gray-600">Debt before:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($reduction['debt_before'], 2) }}</code></p>
-                                                                <p><span class="font-medium text-gray-600">Reduction amount:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($reduction['reduction_amount'], 2) }}</code></p>
-                                                            </div>
-                                                            <div class="space-y-1">
-                                                                @php
-                                                                    // Find the user's share from the expense
-                                                                    $userShare = 0;
-                                                                    foreach($details['normal_splits'] as $split) {
-                                                                        if($split['user_id'] == $reduction['user_id']) {
-                                                                            $userShare = $split['owes_amount'];
-                                                                            break;
-                                                                        }
-                                                                    }
-                                                                    $remainingOwed = $userShare - $reduction['reduction_amount'];
-                                                                @endphp
-                                                                <p><span class="font-medium text-gray-600">Expense share:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($userShare, 2) }}</code></p>
-                                                                <p><span class="font-medium text-gray-600">Used to pay debt:</span> <code class="bg-white px-2 py-1 rounded border text-green-600">-${{ number_format($reduction['reduction_amount'], 2) }}</code></p>
-                                                                <p><span class="font-medium text-gray-600">Remaining owed:</span> <code class="bg-white px-2 py-1 rounded border font-bold text-red-600">${{ number_format($remainingOwed, 2) }}</code></p>
-                                                                <p><span class="font-medium text-gray-600">Debt after:</span> <code class="bg-white px-2 py-1 rounded border font-bold {{ $reduction['debt_after'] > 0 ? 'text-red-600' : 'text-green-600' }}">${{ number_format($reduction['debt_after'], 2) }}</code></p>
-                                                            </div>
+                                                        <div class="text-xs text-gray-600 mt-1">
+                                                            Previous debt: ${{ number_format($reduction['debt_before'], 2) }} →
+                                                            @if($reduction['debt_after'] > 0)
+                                                                Remaining: ${{ number_format($reduction['debt_after'], 2) }}
+                                                            @else
+                                                                <span class="text-green-600">✅ Paid off!</span>
+                                                            @endif
                                                         </div>
-                                                        @if($reduction['debt_after'] > 0)
-                                                            <div class="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-sm">
-                                                                <span class="text-yellow-700">⚠️ Remaining debt: ${{ number_format($reduction['debt_after'], 2) }}</span>
-                                                            </div>
-                                                        @else
-                                                            <div class="mt-2 p-2 bg-green-50 border border-green-200 rounded text-sm">
-                                                                <span class="text-green-700">✅ Debt fully paid off!</span>
-                                                            </div>
-                                                        @endif
                                                     </div>
                                                 @endforeach
-                                            </div>
-                                        </div>
-
-                                        <!-- Step 4: Summary -->
-                                        <div class="mb-4">
-                                            <h6 class="font-bold text-gray-800 mb-2">Step 4: Debt reduction summary</h6>
-                                            <div class="ml-4">
-                                                <div class="bg-green-50 border border-green-200 rounded-lg p-3">
-                                                    <div class="flex items-center gap-2 mb-2">
-                                                        <span class="text-green-600 font-bold">💰</span>
-                                                        <span class="font-semibold text-green-800">Total debt reduction: ${{ number_format(array_sum(array_column($details['debt_reductions'], 'reduction_amount')), 2) }}</span>
-                                                    </div>
-                                                    <p class="text-sm text-green-700">
-                                                        The amount others owe {{ $details['paid_by'] }} from this expense (${{ number_format($details['amount_others_owe_total'], 2) }}) was automatically used to pay down existing debts. ({{ $details['paid_by'] }}'s own share of ${{ number_format($details['per_person'], 2) }} is not included as they paid for themselves.)
-                                                    </p>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    @else
-                                        <div class="mb-4">
-                                            <h6 class="font-bold text-gray-800 mb-2">Step 3: No debt reduction</h6>
-                                            <div class="ml-4">
-                                                <div class="bg-gray-50 border border-gray-200 rounded-lg p-3">
-                                                    <div class="flex items-center gap-2 mb-2">
-                                                        <span class="text-gray-600 font-bold">ℹ️</span>
-                                                        <span class="font-semibold text-gray-800">No existing debts found</span>
-                                                    </div>
-                                                    <p class="text-sm text-gray-600">
-                                                        {{ $details['paid_by'] }} had no existing debts to reduce. The expense will be split normally among all participants.
-                                                    </p>
+                                                <div class="text-center text-sm text-blue-600 mt-2">
+                                                    💰 Total debt reduced: ${{ number_format(array_sum(array_column($details['debt_reductions'], 'reduction_amount')), 2) }}
                                                 </div>
                                             </div>
                                         </div>
                                     @endif
 
-                                    <!-- Step 5: Bank Statement Style Running Balance -->
+                                    <!-- Wallet Balances -->
                                     @if(isset($details['wallet_snapshot_after']) && count($details['wallet_snapshot_after']) > 0)
                                         <div class="mb-4">
-                                            <h6 class="font-bold text-gray-800 mb-3">Step 5: 🏦 Wallet Balance After This Transaction</h6>
+                                            <h6 class="font-bold text-gray-800 mb-3">🏦 Updated Balances</h6>
                                             <div class="ml-4">
                                                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                                                     @foreach($details['wallet_snapshot_after'] as $userId => $walletAfter)
@@ -519,7 +457,7 @@
                             </button>
                             
                             <div id="settlement-breakdown-content-{{ $settlement->id }}" class="hidden px-4 pb-4">
-                                <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 font-mono text-sm">
+                                <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 text-sm">
                                     @php
                                         // Get pre-calculated settlement details
                                         $details = $settlementDetails[$settlement->id] ?? null;
@@ -529,87 +467,46 @@
                                         $remainingDebt = $details['remaining_debt'] ?? 0;
                                         $excessPayment = $details['excess_payment'] ?? 0;
                                     @endphp
-                                    
-                                    <!-- Basic Information -->
-                                    <div class="mb-4">
-                                        <h6 class="font-bold text-gray-800 mb-2">Given:</h6>
-                                        <div class="ml-4 space-y-1">
-                                            <p>Payment Amount = <code class="bg-white px-2 py-1 rounded">${{ number_format($paymentAmount, 2) }}</code></p>
-                                            <p>Paid By = <code class="bg-white px-2 py-1 rounded">{{ $settlement->fromUser->name }}</code></p>
-                                            <p>Paid To = <code class="bg-white px-2 py-1 rounded">{{ $settlement->toUser->name }}</code></p>
-                                            <p>Date = <code class="bg-white px-2 py-1 rounded">{{ $settlement->settlement_date->format('M d, Y') }}</code></p>
-                                        </div>
+
+                                    <!-- Payment Summary -->
+                                    <div class="text-center mb-4">
+                                        <p class="text-lg font-semibold text-gray-800">
+                                            {{ $settlement->fromUser->name }} paid {{ $settlement->toUser->name }} ${{ number_format($paymentAmount, 2) }}
+                                        </p>
+                                        <p class="text-gray-600">Previous debt: ${{ number_format($currentDebt, 2) }}</p>
                                     </div>
 
-                                    <!-- Step 1: Debt before payment -->
+                                    <!-- Result -->
                                     <div class="mb-4">
-                                        <h6 class="font-bold text-gray-800 mb-2">Step 1: Debt before payment</h6>
-                                        <div class="ml-4">
-                                            <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                                                <p>{{ $settlement->fromUser->name }} owed {{ $settlement->toUser->name }} = <code class="bg-white px-2 py-1 rounded">${{ number_format($currentDebt, 2) }}</code></p>
+                                        @if($remainingDebt > 0)
+                                            <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center">
+                                                <div class="flex items-center justify-center gap-2 mb-2">
+                                                    <span class="text-yellow-600 font-bold">⚠️</span>
+                                                    <span class="font-semibold text-yellow-800">Partial Payment</span>
+                                                </div>
+                                                <p class="text-yellow-700">
+                                                    Still owes: <strong>${{ number_format($remainingDebt, 2) }}</strong>
+                                                </p>
                                             </div>
-                                        </div>
-                                    </div>
-
-                                    <!-- Step 2: Payment processing -->
-                                    <div class="mb-4">
-                                        <h6 class="font-bold text-gray-800 mb-2">Step 2: Payment processing</h6>
-                                        <div class="ml-4 space-y-3">
-                                            <div class="bg-green-50 border border-green-200 rounded-lg p-3">
-                                                <div class="flex items-center gap-2 mb-2">
-                                                    <span class="text-green-600 font-bold">💰</span>
-                                                    <span class="font-semibold text-green-800">Payment Details</span>
+                                        @elseif($excessPayment > 0)
+                                            <div class="bg-orange-50 border border-orange-200 rounded-lg p-3 text-center">
+                                                <div class="flex items-center justify-center gap-2 mb-2">
+                                                    <span class="text-orange-600 font-bold">🔄</span>
+                                                    <span class="font-semibold text-orange-800">Overpayment</span>
                                                 </div>
-                                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                                                    <div class="space-y-1">
-                                                        <p><span class="font-medium text-gray-600">Payment amount:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($paymentAmount, 2) }}</code></p>
-                                                        <p><span class="font-medium text-gray-600">Debt reduction:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($reduction, 2) }}</code></p>
-                                                    </div>
-                                                    <div class="space-y-1">
-                                                        <p><span class="font-medium text-gray-600">Calculation:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($currentDebt, 2) }}</code> - <code class="bg-white px-2 py-1 rounded border">${{ number_format($reduction, 2) }}</code></p>
-                                                        <p><span class="font-medium text-gray-600">Remaining debt:</span> <code class="bg-white px-2 py-1 rounded border font-bold {{ $remainingDebt > 0 ? 'text-red-600' : 'text-green-600' }}">${{ number_format($remainingDebt, 2) }}</code></p>
-                                                    </div>
-                                                </div>
+                                                <p class="text-orange-700">
+                                                    {{ $settlement->toUser->name }} now owes: <strong>${{ number_format($excessPayment, 2) }}</strong>
+                                                </p>
                                             </div>
-                                        </div>
-                                    </div>
-
-                                    <!-- Step 3: Result -->
-                                    <div class="mb-4">
-                                        <h6 class="font-bold text-gray-800 mb-2">Step 3: Result after payment</h6>
-                                        <div class="ml-4">
-                                            @if($remainingDebt > 0)
-                                                <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-                                                    <div class="flex items-center gap-2 mb-2">
-                                                        <span class="text-yellow-600 font-bold">⚠️</span>
-                                                        <span class="font-semibold text-yellow-800">Partial Payment</span>
-                                                    </div>
-                                                    <p class="text-sm text-yellow-700">
-                                                        {{ $settlement->fromUser->name }} still owes {{ $settlement->toUser->name }} <strong>${{ number_format($remainingDebt, 2) }}</strong>
-                                                    </p>
+                                        @else
+                                            <div class="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
+                                                <div class="flex items-center justify-center gap-2 mb-2">
+                                                    <span class="text-green-600 font-bold">✅</span>
+                                                    <span class="font-semibold text-green-800">Debt Fully Paid</span>
                                                 </div>
-                                            @elseif($excessPayment > 0)
-                                                <div class="bg-orange-50 border border-orange-200 rounded-lg p-3">
-                                                    <div class="flex items-center gap-2 mb-2">
-                                                        <span class="text-orange-600 font-bold">🔄</span>
-                                                        <span class="font-semibold text-orange-800">Overpayment - Debt Reversal</span>
-                                                    </div>
-                                                    <p class="text-sm text-orange-700">
-                                                        {{ $settlement->toUser->name }} now owes {{ $settlement->fromUser->name }} <strong>${{ number_format($excessPayment, 2) }}</strong>
-                                                    </p>
-                                                </div>
-                                            @else
-                                                <div class="bg-green-50 border border-green-200 rounded-lg p-3">
-                                                    <div class="flex items-center gap-2 mb-2">
-                                                        <span class="text-green-600 font-bold">✅</span>
-                                                        <span class="font-semibold text-green-800">Debt Fully Paid</span>
-                                                    </div>
-                                                    <p class="text-sm text-green-700">
-                                                        {{ $settlement->fromUser->name }} and {{ $settlement->toUser->name }} are now settled up!
-                                                    </p>
-                                                </div>
-                                            @endif
-                                        </div>
+                                                <p class="text-green-700">All settled up!</p>
+                                            </div>
+                                        @endif
                                     </div>
                                 </div>
                             </div>
