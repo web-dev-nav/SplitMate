@@ -235,7 +235,7 @@
                         $expense = $transaction->data;
                         $details = $expenseDetails[$expense->id] ?? null;
                     @endphp
-                    <div class="bg-blue-50 border-l-4 border-blue-500 rounded-xl p-4 mb-4">
+                    <div id="expense-{{ $expense->id }}" class="bg-blue-50 border-l-4 border-blue-500 rounded-xl p-4 mb-4">
                         <!-- Main expense info -->
                         <div class="flex items-center justify-between mb-3">
                             <div class="flex-1">
@@ -324,7 +324,20 @@
                                                                 <p><span class="font-medium text-gray-600">Reduction amount:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($reduction['reduction_amount'], 2) }}</code></p>
                                                             </div>
                                                             <div class="space-y-1">
-                                                                <p><span class="font-medium text-gray-600">Calculation:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($reduction['debt_before'], 2) }}</code> - <code class="bg-white px-2 py-1 rounded border">${{ number_format($reduction['reduction_amount'], 2) }}</code></p>
+                                                                @php
+                                                                    // Find the user's share from the expense
+                                                                    $userShare = 0;
+                                                                    foreach($details['normal_splits'] as $split) {
+                                                                        if($split['user_id'] == $reduction['user_id']) {
+                                                                            $userShare = $split['owes_amount'];
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                    $remainingOwed = $userShare - $reduction['reduction_amount'];
+                                                                @endphp
+                                                                <p><span class="font-medium text-gray-600">Expense share:</span> <code class="bg-white px-2 py-1 rounded border">${{ number_format($userShare, 2) }}</code></p>
+                                                                <p><span class="font-medium text-gray-600">Used to pay debt:</span> <code class="bg-white px-2 py-1 rounded border text-green-600">-${{ number_format($reduction['reduction_amount'], 2) }}</code></p>
+                                                                <p><span class="font-medium text-gray-600">Remaining owed:</span> <code class="bg-white px-2 py-1 rounded border font-bold text-red-600">${{ number_format($remainingOwed, 2) }}</code></p>
                                                                 <p><span class="font-medium text-gray-600">Debt after:</span> <code class="bg-white px-2 py-1 rounded border font-bold {{ $reduction['debt_after'] > 0 ? 'text-red-600' : 'text-green-600' }}">${{ number_format($reduction['debt_after'], 2) }}</code></p>
                                                             </div>
                                                         </div>
@@ -474,7 +487,7 @@
                     </div>
                 @else
                     @php $settlement = $transaction->data @endphp
-                    <div class="bg-green-50 rounded-xl border-l-4 border-green-500 p-4">
+                    <div id="settlement-{{ $settlement->id }}" class="bg-green-50 rounded-xl border-l-4 border-green-500 p-4">
                         <div class="flex items-center justify-between mb-2">
                             <div class="flex-1">
                                 <p class="font-bold text-lg text-gray-800">

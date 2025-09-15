@@ -63,12 +63,8 @@
                     <div class="text-sm text-gray-600">Payments</div>
                 </div>
                 <div class="bg-orange-50 rounded-lg p-4">
-                    @php
-                        $dateRange = $statements->count() > 0 ?
-                            \Carbon\Carbon::parse($statements->last()->transaction_date)->diffInDays($statements->first()->transaction_date) + 1 : 0;
-                    @endphp
-                    <div class="text-2xl font-bold text-orange-600">{{ $dateRange }}</div>
-                    <div class="text-sm text-gray-600">Days</div>
+                    <div class="text-2xl font-bold text-orange-600">{{ $statements->count() }}</div>
+                    <div class="text-sm text-gray-600">Records</div>
                 </div>
             </div>
         </div>
@@ -90,6 +86,7 @@
                                 <th class="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Description</th>
                                 <th class="px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">Amount</th>
                                 <th class="px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">Running Balance</th>
+                                <th class="px-6 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">View Details</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-gray-200">
@@ -206,6 +203,27 @@
                                         <span class="font-bold {{ $statement->balance_after >= 0 ? 'text-green-600' : 'text-red-600' }}">
                                             {{ $statement->formatted_balance_after }}
                                         </span>
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-center">
+                                        @if($statement->expense_id)
+                                            <a href="{{ route('expenses.index') }}#expense-{{ $statement->expense_id }}"
+                                               class="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors">
+                                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                                </svg>
+                                                View Expense
+                                            </a>
+                                        @elseif($statement->settlement_id)
+                                            <a href="{{ route('expenses.index') }}#settlement-{{ $statement->settlement_id }}"
+                                               class="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium text-green-600 hover:text-green-800 bg-green-50 hover:bg-green-100 rounded-md transition-colors">
+                                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1"></path>
+                                                </svg>
+                                                View Payment
+                                            </a>
+                                        @else
+                                            <span class="text-xs text-gray-400">—</span>
+                                        @endif
                                     </td>
                                 </tr>
                             @endforeach
