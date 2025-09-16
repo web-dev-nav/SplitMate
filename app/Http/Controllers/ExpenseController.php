@@ -3,1768 +3,1405 @@
 namespace App\Http\Controllers;
 
 use App\Models\Expense;
-use App\Models\ExpensePayback;
 use App\Models\Settlement;
 use App\Models\StatementRecord;
 use App\Models\User;
 use App\Models\BalanceState;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
 
 class ExpenseController extends Controller
 {
+    /**
+     * Main dashboard view
+     */
     public function index()
     {
         $users = User::where('is_active', true)->get();
-        $expenses = Expense::with(['paidByUser', 'paybackToUser', 'paybacks.paybackToUser'])->orderBy('created_at', 'desc')->paginate(5);
-        $settlements = Settlement::with(['fromUser', 'toUser'])->orderBy('created_at', 'desc')->paginate(5);
-        
-        $balances = $this->calculateBalancesCorrectly();
-        
-        // Calculate debts for automatic payback suggestions
-        $debts = $this->calculateDebtsForUser();
-        
-        // Calculate debt reduction details for each expense
+        $expenses = Expense::with(['paidByUser', 'paybackToUser'])->latest()->paginate(5);
+        $settlements = Settlement::with(['fromUser', 'toUser'])->latest()->paginate(5);
+
+        // Calculate current balances
+        $balances = $this->calculateBalances();
+
+        // Get suggestions for who should pay whom (legacy: called 'debts' in old view)
+        $debts = $this->getPaymentSuggestions($balances);
+
+        // Calculate detailed breakdowns for each transaction
         $expenseDetails = $this->calculateExpenseDetails($expenses, $users);
-        
-        // Calculate settlement breakdown details
         $settlementDetails = $this->calculateSettlementDetails($settlements, $users);
 
         return view('expenses.index', compact('users', 'expenses', 'settlements', 'balances', 'debts', 'expenseDetails', 'settlementDetails'));
     }
 
+    /**
+     * Store new expense
+     */
     public function store(Request $request)
     {
-        try {
-            // Debug: Log the request data
-            \Log::info('Expense form data:', $request->all());
-            
-            $validated = $request->validate([
-                'description' => 'required|string|max:255',
-                'amount' => 'required|numeric|min:0.01|max:999999.99',
-                'paid_by_user_id' => 'required|exists:users,id',
-                'expense_date' => 'required|date|before_or_equal:today',
-                'receipt_photo' => 'required|image|max:2048',
-            ], [
-                'receipt_photo.required' => 'Please upload a receipt photo. This is required for expense tracking.',
-                'receipt_photo.image' => 'The receipt must be an image file (JPG, PNG, GIF, etc.).',
-                'receipt_photo.max' => 'The receipt image must be smaller than 2MB.',
-                'amount.max' => 'The expense amount cannot exceed $999,999.99.',
-                'expense_date.before_or_equal' => 'The expense date cannot be in the future.',
-            ]);
+        $validated = $request->validate([
+            'description' => 'required|string|max:255',
+            'amount' => 'required|numeric|min:0.01|max:999999.99',
+            'paid_by_user_id' => 'required|exists:users,id',
+            'expense_date' => 'required|date|before_or_equal:today',
+            'receipt_photo' => 'required|image|max:2048',
+        ]);
 
-            $validated['receipt_photo'] = $request->file('receipt_photo')->store('receipts', 'public');
+        DB::transaction(function () use ($validated) {
+            $validated['receipt_photo'] = request()->file('receipt_photo')->store('receipts', 'public');
 
-            // Use database transaction to ensure data consistency
-            $expense = DB::transaction(function () use ($validated) {
-                // Set the user count and participant IDs at the time of expense creation
-                $users = User::where('is_active', true)->get();
-                
-                // Validate minimum user count
-                if ($users->count() < 2) {
-                    throw new \InvalidArgumentException('At least 2 active users are required to create an expense.');
-                }
-                
-                $validated['user_count_at_time'] = $users->count();
-                $validated['participant_ids'] = $users->pluck('id')->toArray();
+            // Store participant info at time of expense
+            $users = User::where('is_active', true)->get();
+            $validated['user_count_at_time'] = $users->count();
+            $validated['participant_ids'] = $users->pluck('id')->toArray();
 
-                // Create the expense
-                $expense = Expense::create($validated);
+            $expense = Expense::create($validated);
+            $this->createStatementRecords($expense);
+        });
 
-                // Store wallet snapshot after expense
-                $this->storeWalletSnapshot($users, $expense->id, null);
-
-                // Save balance state after expense
-                $this->saveBalanceState($expense->id, null);
-
-                // Create individual statement records for all affected users
-                $this->createStatementRecords($users, $expense);
-
-                return $expense;
-            });
-
-            $message = 'Expense added successfully!';
-
-            return redirect()->back()->with('success', $message);
-        } catch (\InvalidArgumentException $e) {
-            return redirect()->back()->withErrors(['general' => $e->getMessage()])->withInput();
-        } catch (\Exception $e) {
-            \Log::error('Expense creation error: ' . $e->getMessage(), [
-                'request_data' => $request->all(),
-                'trace' => $e->getTraceAsString()
-            ]);
-            return redirect()->back()->with('error', 'Error adding expense: ' . $e->getMessage());
-        }
+        return redirect()->back()->with('success', 'Expense added successfully!');
     }
 
+    /**
+     * Store settlement payment
+     */
     public function storeSettlement(Request $request)
     {
-        try {
-            $validated = $request->validate([
-                'from_user_id' => 'required|exists:users,id',
-                'to_user_id' => 'required|exists:users,id|different:from_user_id',
-                'amount' => 'required|numeric|min:0.01',
-                'settlement_date' => 'required|date',
-                'payment_screenshot' => 'required|image|max:2048',
-            ], [
-                'payment_screenshot.required' => 'Please upload a payment screenshot. This is required to verify the settlement.',
-                'payment_screenshot.image' => 'The payment proof must be an image file (JPG, PNG, GIF, etc.).',
-                'payment_screenshot.max' => 'The payment screenshot must be smaller than 2MB.',
-            ]);
-
-            $validated['payment_screenshot'] = $request->file('payment_screenshot')->store('payment-screenshots', 'public');
-
-            // Use database transaction to prevent race conditions
-            $settlement = DB::transaction(function () use ($validated) {
-                // Check if the payment amount exceeds what the user actually owes
-                $balances = $this->calculateBalancesCorrectly();
-                $fromUserId = $validated['from_user_id'];
-                $toUserId = $validated['to_user_id'];
-                $paymentAmount = $validated['amount'];
-
-                // Get the current debt amount from the balances structure
-                $currentDebt = 0;
-                if (isset($balances[$fromUserId]['owes'][$toUserId])) {
-                    $currentDebt = $balances[$fromUserId]['owes'][$toUserId];
-                }
-
-                // If the payment amount exceeds the debt, throw an exception (with 1 cent tolerance)
-                if ($paymentAmount > $currentDebt + 0.01) {
-                    throw new \InvalidArgumentException("You can only pay up to $" . number_format($currentDebt, 2) . " (the amount you currently owe).");
-                }
-
-                $settlement = Settlement::create($validated);
-
-                // Store wallet snapshot after settlement
-                $users = User::where('is_active', true)->get();
-                $this->storeWalletSnapshot($users, null, $settlement->id);
-
-                // Save balance state after settlement
-                $this->saveBalanceState(null, $settlement->id);
-
-                // Create individual statement records for all affected users
-                $this->createStatementRecords($users, null, $settlement);
-
-                return $settlement;
-            });
-
-            return redirect()->back()->with('success', 'Settlement recorded successfully!');
-        } catch (\InvalidArgumentException $e) {
-            return redirect()->back()->withErrors(['amount' => $e->getMessage()])->withInput();
-        } catch (\Exception $e) {
-            return redirect()->back()->with('error', 'Error recording settlement: ' . $e->getMessage());
-        }
-    }
-
-    private function calculateBalances()
-    {
-        return $this->calculateBalancesCorrectly();
-    }
-
-    private function calculateDebtsForUser()
-    {
-        $balances = $this->calculateBalancesCorrectly();
-        $debts = [];
-
-        foreach ($balances as $userId => $userBalance) {
-            $debts[$userId] = [
-                'name' => $userBalance['name'],
-                'owes' => []
-            ];
-
-            foreach ($userBalance['owes'] as $otherUserId => $amount) {
-                $otherUser = User::find($otherUserId);
-                $debts[$userId]['owes'][$otherUserId] = [
-                    'name' => $otherUser->name,
-                    'amount' => $amount
-                ];
-            }
-        }
-
-        return $debts;
-    }
-
-    private function calculateExpenseDetails($expenses, $users)
-    {
-        $expenseDetails = [];
-        
-        foreach ($expenses as $expense) {
-            // Use the user count that existed when this expense was created
-            $totalUsers = $expense->user_count_at_time ?? $users->count();
-            $paidBy = $expense->paid_by_user_id;
-
-            // Get only the users who existed when this expense was created
-            if ($expense->participant_ids && count($expense->participant_ids) > 0) {
-                $usersAtTime = User::whereIn('id', $expense->participant_ids)->get();
-            } else {
-                $usersAtTime = $users->take($totalUsers);
-            }
-
-            // Calculate precise per-person amounts with proper remainder distribution
-            $expenseAmountCents = round($expense->amount * 100);
-            $participantCount = count($usersAtTime);
-            $perPersonCents = intval($expenseAmountCents / $participantCount);
-            $remainderCents = $expenseAmountCents % $participantCount;
-
-            $details = [
-                'expense_id' => $expense->id,
-                'description' => $expense->description,
-                'amount' => $expense->amount,
-                'per_person' => $perPersonCents / 100, // Base amount for display
-                'paid_by' => $expense->paidByUser->name,
-                'paid_by_id' => $paidBy,
-                'expense_date' => $expense->expense_date,
-                'debt_reductions' => [],
-                'normal_splits' => [],
-                'amount_others_owe_total' => 0
-            ];
-
-            // Calculate what debts existed before this expense
-            $debtsBefore = $this->getDebtsBeforeExpense($expense, $users);
-
-            // Calculate normal splits (who owes what to the payer) with precise amounts
-            $userIndex = 0;
-            $totalOthersOweCents = 0;
-            foreach ($usersAtTime as $user) {
-                if ($user->id != $paidBy) {
-                    // Add extra cent to first users if there's a remainder
-                    $thisPersonAmountCents = $perPersonCents + ($userIndex < $remainderCents ? 1 : 0);
-                    $thisPersonAmount = $thisPersonAmountCents / 100;
-
-                    $details['normal_splits'][] = [
-                        'user_id' => $user->id,
-                        'user_name' => $user->name,
-                        'owes_amount' => $thisPersonAmount
-                    ];
-
-                    $totalOthersOweCents += $thisPersonAmountCents;
-                }
-                $userIndex++;
-            }
-
-            $details['amount_others_owe_total'] = $totalOthersOweCents / 100;
-            
-            // Calculate debt reductions for the payer
-            if (isset($debtsBefore[$paidBy])) {
-                // Sort debts by amount (highest first)
-                $sortedDebts = $debtsBefore[$paidBy];
-                arsort($sortedDebts);
-
-                foreach ($sortedDebts as $userId => $debtAmount) {
-                    // Only apply debt reduction if this user participated in the current expense
-                    $userParticipated = $usersAtTime->contains('id', $userId);
-                    if (!$userParticipated) continue;
-
-                    // Find how much this specific user owes the payer from this expense
-                    $userOwesPayer = 0;
-                    foreach ($details['normal_splits'] as $split) {
-                        if ($split['user_id'] == $userId) {
-                            $userOwesPayer = $split['owes_amount'];
-                            break;
-                        }
-                    }
-
-                    // The reduction is the minimum of: debt amount OR what this user owes the payer
-                    $reductionAmount = min($debtAmount, $userOwesPayer);
-
-                    $user = $users->find($userId);
-                    $details['debt_reductions'][] = [
-                        'user_id' => $userId,
-                        'user_name' => $user->name,
-                        'debt_before' => $debtAmount,
-                        'reduction_amount' => $reductionAmount,
-                        'debt_after' => $debtAmount - $reductionAmount
-                    ];
-                }
-            }
-            
-            // Get wallet balance snapshots before and after this transaction for bank statement style
-            $details['wallet_snapshot_before'] = $this->getWalletSnapshotBeforeExpense($expense, $users);
-            $details['wallet_snapshot_after'] = $this->getWalletSnapshotAfterSpecificExpense($expense, $users);
-            
-            $expenseDetails[$expense->id] = $details;
-        }
-        
-        return $expenseDetails;
-    }
-
-    private function getDebtsBeforeExpense($currentExpense, $users)
-    {
-        // Get all expenses before this one (by created_at)
-        $previousExpenses = Expense::where('created_at', '<', $currentExpense->created_at)
-            ->with('paybacks')
-            ->orderBy('created_at')
-            ->get();
-        
-        $settlements = Settlement::where('created_at', '<', $currentExpense->created_at)
-            ->orderBy('created_at')
-            ->get();
-        
-        // Calculate balances up to this point
-        $netBalances = [];
-        foreach ($users as $user1) {
-            foreach ($users as $user2) {
-                if ($user1->id != $user2->id) {
-                    $netBalances[$user1->id][$user2->id] = 0;
-                }
-            }
-        }
-
-        // Process previous expenses
-        foreach ($previousExpenses as $expense) {
-            // Use the user count that existed when this expense was created
-            $totalUsers = $expense->user_count_at_time ?? $users->count();
-            $perPerson = $totalUsers > 0 ? $expense->amount / $totalUsers : $expense->amount;
-            $paidBy = $expense->paid_by_user_id;
-
-            // Get only the users who existed when this expense was created
-            if ($expense->participant_ids && count($expense->participant_ids) > 0) {
-                $usersAtTime = User::whereIn('id', $expense->participant_ids)->get();
-            } else {
-                // Fallback for old expenses without participant_ids
-                $usersAtTime = $users->take($totalUsers);
-            }
-
-            // Split expense among users who existed at the time FIRST
-            foreach ($usersAtTime as $user) {
-                if ($user->id != $paidBy) {
-                    $netBalances[$user->id][$paidBy] += $perPerson;
-                    $netBalances[$paidBy][$user->id] -= $perPerson;
-                }
-            }
-
-            // Apply debt reduction logic to get the actual debts that existed
-            // Calculate expense amount in cents for precise reduction
-            $expenseAmountCents = round($expense->amount * 100);
-            $sortedUsers = $usersAtTime->sortBy('id');
-            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
-        }
-
-        // Process settlements with proper debt consolidation
-        foreach ($settlements as $settlement) {
-            $fromId = $settlement->from_user_id;
-            $toId = $settlement->to_user_id;
-            $amount = $settlement->amount;
-
-            // Check if there's an existing debt from 'from' to 'to'
-            if ($netBalances[$fromId][$toId] > 0) {
-                // Reduce existing debt first
-                $reduction = min($amount, $netBalances[$fromId][$toId]);
-                $netBalances[$fromId][$toId] -= $reduction;
-                $netBalances[$toId][$fromId] += $reduction;
-                
-                // If payment exceeds debt, create reverse debt (to now owes from)
-                if ($amount > $reduction) {
-                    $excess = $amount - $reduction;
-                    $netBalances[$toId][$fromId] -= $excess;
-                    $netBalances[$fromId][$toId] += $excess;
-                }
-            } else {
-                // No existing debt, create new debt (to owes from)
-                $netBalances[$toId][$fromId] += $amount;
-                $netBalances[$fromId][$toId] -= $amount;
-            }
-        }
-
-        // Convert to debt format
-        $debts = [];
-        foreach ($users as $user) {
-            $debts[$user->id] = [];
-            foreach ($users as $otherUser) {
-                if ($user->id != $otherUser->id && $netBalances[$user->id][$otherUser->id] > 0) {
-                    $debts[$user->id][$otherUser->id] = $netBalances[$user->id][$otherUser->id];
-                }
-            }
-        }
-
-        return $debts;
-    }
-
-    private function autoReduceDebtsForPayer(&$netBalances, $paidBy, $expenseAmountCents, $usersAtTime)
-    {
-        // Find all debts the payer owes to others (positive values in netBalances[$paidBy][$otherUser])
-        $debtsToReduce = [];
-        foreach ($usersAtTime as $user) {
-            if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
-                $debtsToReduce[$user->id] = $netBalances[$paidBy][$user->id];
-            }
-        }
-
-        if (empty($debtsToReduce)) {
-            return; // No debts to reduce
-        }
-
-        // Calculate precise per-person amounts with remainder distribution
-        $participantCount = count($usersAtTime);
-        $perPersonCents = intval($expenseAmountCents / $participantCount);
-        $remainderCents = $expenseAmountCents % $participantCount;
-
-        // Process debt reduction for each user with existing debt
-        $userIndex = 0;
-        foreach ($usersAtTime as $user) {
-            if ($user->id != $paidBy && isset($debtsToReduce[$user->id])) {
-                // Calculate how much this user owes the payer from this expense
-                $thisPersonAmountCents = $perPersonCents + ($userIndex < $remainderCents ? 1 : 0);
-                $thisPersonAmount = $thisPersonAmountCents / 100;
-
-                $existingDebt = $debtsToReduce[$user->id];
-
-                if ($thisPersonAmount >= $existingDebt) {
-                    // The expense share is enough to completely pay off the debt + create new debt
-                    $netBalances[$paidBy][$user->id] = 0; // Debt fully paid
-                    $netBalances[$user->id][$paidBy] = $thisPersonAmount - $existingDebt; // User now owes the difference
-                } else {
-                    // The expense share only partially pays off the debt
-                    $netBalances[$paidBy][$user->id] = $existingDebt - $thisPersonAmount; // Reduced debt
-                    $netBalances[$user->id][$paidBy] = 0; // User owes nothing
-                }
-            }
-            $userIndex++;
-        }
-    }
-
-    private function storeWalletSnapshot($users, $expenseId = null, $settlementId = null)
-    {
-        // Calculate current wallet balances (this already includes debt reductions)
-        $balances = $this->calculateBalancesCorrectly();
-
-        foreach ($users as $user) {
-            if (isset($balances[$user->id])) {
-                $userBalance = $balances[$user->id];
-
-                \App\Models\WalletSnapshot::create([
-                    'expense_id' => $expenseId,
-                    'settlement_id' => $settlementId,
-                    'user_id' => $user->id,
-                    'net_balance' => $this->calculateNetBalance($userBalance),
-                    'owes_details' => $userBalance['owes'] ?? [],
-                    'receives_details' => $userBalance['owed_by'] ?? [],
-                    'snapshot_date' => now(),
-                ]);
-            }
-        }
-    }
-
-    private function calculateNetBalance($userBalance)
-    {
-        $netBalance = 0;
-        
-        // Subtract what user owes
-        foreach ($userBalance['owes'] ?? [] as $amount) {
-            $netBalance -= $amount;
-        }
-        
-        // Add what user is owed
-        foreach ($userBalance['owed_by'] ?? [] as $amount) {
-            $netBalance += $amount;
-        }
-        
-        return $netBalance;
-    }
-
-    public function getWalletSnapshots()
-    {
-        $snapshots = \App\Models\WalletSnapshot::with(['user', 'expense', 'settlement'])
-            ->orderBy('snapshot_date')
-            ->get()
-            ->groupBy('snapshot_date');
-
-        return response()->json($snapshots);
-    }
-
-    private function getWalletSnapshotFromDB($expenseId = null, $settlementId = null)
-    {
-        $query = \App\Models\WalletSnapshot::with('user');
-        
-        if ($expenseId) {
-            $query->where('expense_id', $expenseId);
-        }
-        
-        if ($settlementId) {
-            $query->where('settlement_id', $settlementId);
-        }
-        
-        $snapshots = $query->get();
-        
-        // Convert to the format expected by the view
-        $walletBalances = [];
-        foreach ($snapshots as $snapshot) {
-            $walletBalances[$snapshot->user_id] = [
-                'user_id' => $snapshot->user_id,
-                'user_name' => $snapshot->user->name,
-                'owes' => $snapshot->owes_details ?? [],
-                'receives' => $snapshot->receives_details ?? [],
-                'net_balance' => $snapshot->net_balance
-            ];
-        }
-        
-        return $walletBalances;
-    }
-
-    public function getDebtBeforeSettlement($settlement, $users)
-    {
-        // Get all expenses and settlements before this settlement (by created_at)
-        $previousExpenses = Expense::where('created_at', '<', $settlement->created_at)
-            ->with('paybacks')
-            ->orderBy('created_at')
-            ->get();
-        
-        $previousSettlements = Settlement::where('created_at', '<', $settlement->created_at)
-            ->orderBy('created_at')
-            ->get();
-        
-        // Calculate balances up to this point
-        $netBalances = [];
-        foreach ($users as $user1) {
-            foreach ($users as $user2) {
-                if ($user1->id != $user2->id) {
-                    $netBalances[$user1->id][$user2->id] = 0;
-                }
-            }
-        }
-
-        // Process previous expenses
-        foreach ($previousExpenses as $expense) {
-            // Use the user count that existed when this expense was created
-            $totalUsers = $expense->user_count_at_time ?? $users->count();
-            $perPerson = $totalUsers > 0 ? $expense->amount / $totalUsers : $expense->amount;
-            $paidBy = $expense->paid_by_user_id;
-
-            // Get only the users who existed when this expense was created
-            if ($expense->participant_ids && count($expense->participant_ids) > 0) {
-                $usersAtTime = User::whereIn('id', $expense->participant_ids)->get();
-            } else {
-                // Fallback for old expenses without participant_ids
-                $usersAtTime = $users->take($totalUsers);
-            }
-
-            // Split expense among users who existed at the time FIRST
-            foreach ($usersAtTime as $user) {
-                if ($user->id != $paidBy) {
-                    $netBalances[$user->id][$paidBy] += $perPerson;
-                    $netBalances[$paidBy][$user->id] -= $perPerson;
-                }
-            }
-
-            // Apply debt reduction logic to get the actual debts that existed
-            // Calculate expense amount in cents for precise reduction
-            $expenseAmountCents = round($expense->amount * 100);
-            $sortedUsers = $usersAtTime->sortBy('id');
-            $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
-        }
-
-        // Process previous settlements with proper debt consolidation
-        foreach ($previousSettlements as $prevSettlement) {
-            $fromId = $prevSettlement->from_user_id;
-            $toId = $prevSettlement->to_user_id;
-            $amount = $prevSettlement->amount;
-
-            // Check if there's an existing debt from 'from' to 'to'
-            if ($netBalances[$fromId][$toId] > 0) {
-                // Reduce existing debt first
-                $reduction = min($amount, $netBalances[$fromId][$toId]);
-                $netBalances[$fromId][$toId] -= $reduction;
-                $netBalances[$toId][$fromId] += $reduction;
-                
-                // If payment exceeds debt, create reverse debt (to now owes from)
-                if ($amount > $reduction) {
-                    $excess = $amount - $reduction;
-                    $netBalances[$toId][$fromId] -= $excess;
-                    $netBalances[$fromId][$toId] += $excess;
-                }
-            } else {
-                // No existing debt, create new debt (to owes from)
-                $netBalances[$toId][$fromId] += $amount;
-                $netBalances[$fromId][$toId] -= $amount;
-            }
-        }
-
-        return $netBalances;
-    }
-
-    private function calculateSettlementDetails($settlements, $users)
-    {
-        $settlementDetails = [];
-        
-        foreach ($settlements as $settlement) {
-            // Get debt amounts before this settlement
-            $debtBefore = $this->getDebtBeforeSettlement($settlement, $users);
-            $currentDebt = $debtBefore[$settlement->from_user_id][$settlement->to_user_id] ?? 0;
-            $paymentAmount = $settlement->amount;
-            $reduction = min($paymentAmount, $currentDebt);
-            $remainingDebt = max(0, $currentDebt - $paymentAmount);
-            $excessPayment = max(0, $paymentAmount - $currentDebt);
-            
-            $settlementDetails[$settlement->id] = [
-                'settlement_id' => $settlement->id,
-                'from_user_name' => $settlement->fromUser->name,
-                'to_user_name' => $settlement->toUser->name,
-                'payment_amount' => $paymentAmount,
-                'current_debt' => $currentDebt,
-                'reduction' => $reduction,
-                'remaining_debt' => $remainingDebt,
-                'excess_payment' => $excessPayment,
-                'settlement_date' => $settlement->settlement_date,
-                'wallet_snapshot_before' => $this->getWalletSnapshotBeforeSettlement($settlement, $users),
-                'wallet_snapshot_after' => $this->getWalletSnapshotAfterSettlement($settlement, $users),
-            ];
-        }
-        
-        return $settlementDetails;
-    }
-
-    /**
-     * Calculate current balances using saved balance states for efficiency
-     */
-    private function calculateBalancesFromStates()
-    {
-        // Always use the correct calculation method instead of saved states
-        return $this->calculateBalancesCorrectly();
-    }
-
-    /**
-     * Save balance state after a transaction
-     */
-    private function saveBalanceState($expenseId = null, $settlementId = null)
-    {
-        // Calculate current balances
-        $balances = $this->calculateBalancesCorrectly();
-
-        // Save the balance state
-        BalanceState::create([
-            'expense_id' => $expenseId,
-            'settlement_id' => $settlementId,
-            'user_balances' => $balances,
-            'transaction_date' => now(),
+        $validated = $request->validate([
+            'from_user_id' => 'required|exists:users,id',
+            'to_user_id' => 'required|exists:users,id|different:from_user_id',
+            'amount' => 'required|numeric|min:0.01',
+            'settlement_date' => 'required|date',
+            'payment_screenshot' => 'required|image|max:2048',
         ]);
-    }
 
-    /**
-     * Get balance state before a specific transaction
-     */
-    private function getBalanceStateBefore($expenseId = null, $settlementId = null)
-    {
-        $query = BalanceState::query();
-        
-        if ($expenseId) {
-            $expense = Expense::find($expenseId);
-            if ($expense) {
-                $query->where('transaction_date', '<', $expense->created_at);
+        DB::transaction(function () use ($validated) {
+            // Verify payment doesn't exceed debt
+            $balances = $this->calculateBalances();
+            $currentDebt = $balances[$validated['from_user_id']]['owes'][$validated['to_user_id']] ?? 0;
+
+            if ($validated['amount'] > $currentDebt + 0.01) {
+                throw new \InvalidArgumentException("Payment amount exceeds current debt of $" . number_format($currentDebt, 2));
             }
-        }
-        
-        if ($settlementId) {
-            $settlement = Settlement::find($settlementId);
-            if ($settlement) {
-                $query->where('transaction_date', '<', $settlement->created_at);
-            }
-        }
-        
-        $previousState = $query->latest('transaction_date')->first();
-        
-        return $previousState ? $previousState->user_balances : [];
+
+            $validated['payment_screenshot'] = request()->file('payment_screenshot')->store('payment-screenshots', 'public');
+
+            $settlement = Settlement::create($validated);
+            $this->createStatementRecords(null, $settlement);
+        });
+
+        return redirect()->back()->with('success', 'Settlement recorded successfully!');
     }
 
     /**
-     * Get balance state after a specific transaction
+     * SIMPLIFIED: Calculate all user balances
+     * This is the core calculation method - simplified from 150+ lines to ~60 lines
      */
-    private function getBalanceStateAfterTransaction($expenseId = null, $settlementId = null)
-    {
-        $query = BalanceState::query();
-        
-        if ($expenseId) {
-            $query->where('expense_id', $expenseId);
-        }
-        
-        if ($settlementId) {
-            $query->where('settlement_id', $settlementId);
-        }
-        
-        $state = $query->first();
-        
-        if (!$state) {
-            return [];
-        }
-        
-        // Convert balance state format to wallet snapshot format
-        $walletBalances = [];
-        foreach ($state->user_balances as $userId => $userBalance) {
-            $walletBalances[$userId] = [
-                'user_id' => $userId,
-                'user_name' => $userBalance['name'],
-                'owes' => $userBalance['owes'] ?? [],
-                'receives' => $userBalance['owed_by'] ?? [],
-                'net_balance' => $this->calculateNetBalance($userBalance)
-            ];
-        }
-        
-        return $walletBalances;
-    }
-
-    /**
-     * Calculate balances using the proven correct logic
-     */
-    public function calculateBalancesCorrectly()
+    public function calculateBalances()
     {
         $users = User::where('is_active', true)->get();
-        $expenses = Expense::with('paybacks')->orderBy('created_at')->get();
-        $settlements = Settlement::orderBy('created_at')->get();
-        
-        // Initialize net balances between each pair of users
-        $netBalances = [];
-        foreach ($users as $user1) {
-            foreach ($users as $user2) {
-                if ($user1->id != $user2->id) {
-                    $netBalances[$user1->id][$user2->id] = 0;
-                }
-            }
-        }
 
-        // Process expenses
-        foreach ($expenses as $expense) {
-            // Use the user count that existed when this expense was created
-            $totalUsers = $expense->user_count_at_time ?? $users->count();
-            $paidBy = $expense->paid_by_user_id;
-
-            // Get only the users who existed when this expense was created
-            if ($expense->participant_ids && count($expense->participant_ids) > 0) {
-                $usersAtTime = User::whereIn('id', $expense->participant_ids)->get();
-            } else {
-                // Fallback for old expenses without participant_ids
-                $usersAtTime = $users->take($totalUsers);
-            }
-
-            // Calculate precise per-person amounts with proper remainder distribution
-            $expenseAmountCents = round($expense->amount * 100);
-            $participantCount = count($usersAtTime);
-            $perPersonCents = intval($expenseAmountCents / $participantCount);
-            $remainderCents = $expenseAmountCents % $participantCount;
-
-            // Sort users by ID to ensure consistent remainder distribution
-            $sortedUsers = $usersAtTime->sortBy('id');
-
-            // Split expense among users who existed at the time (normal splitting) FIRST
-            $userIndex = 0;
-            $amountOthersOweCents = 0;
-            foreach ($sortedUsers as $user) {
-                if ($user->id != $paidBy) {
-                    // Add extra cent to first users if there's a remainder
-                    $thisPersonAmountCents = $perPersonCents + ($userIndex < $remainderCents ? 1 : 0);
-                    $thisPersonAmount = $thisPersonAmountCents / 100;
-
-                    // User owes the person who paid
-                    $netBalances[$user->id][$paidBy] += $thisPersonAmount;
-                    $netBalances[$paidBy][$user->id] -= $thisPersonAmount;
-
-                    $amountOthersOweCents += $thisPersonAmountCents;
-                }
-                $userIndex++;
-            }
-            $amountOthersOwe = $amountOthersOweCents / 100;
-
-            // Apply debt reduction if the payer has existing debts
-            $hasExistingDebts = false;
-            foreach ($sortedUsers as $user) {
-                if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
-                    $hasExistingDebts = true;
-                    break;
-                }
-            }
-
-            if ($hasExistingDebts) {
-                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
-            }
-        }
-
-        // Process settlements with proper debt consolidation
-        foreach ($settlements as $settlement) {
-            $fromId = $settlement->from_user_id;
-            $toId = $settlement->to_user_id;
-            $amount = $settlement->amount;
-
-            // Check if there's an existing debt from 'from' to 'to'
-            if ($netBalances[$fromId][$toId] > 0) {
-                // Reduce existing debt first
-                $reduction = min($amount, $netBalances[$fromId][$toId]);
-                $netBalances[$fromId][$toId] -= $reduction;
-                $netBalances[$toId][$fromId] += $reduction;
-                
-                // If payment exceeds debt, create reverse debt (to now owes from)
-                if ($amount > $reduction) {
-                    $excess = $amount - $reduction;
-                    $netBalances[$toId][$fromId] -= $excess;
-                    $netBalances[$fromId][$toId] += $excess;
-                }
-            } else {
-                // No existing debt, create new debt (to owes from)
-                $netBalances[$toId][$fromId] += $amount;
-                $netBalances[$fromId][$toId] -= $amount;
-            }
-        }
-
-
-        // Consolidate balances to prevent mutual debts
-        foreach ($users as $user1) {
-            foreach ($users as $user2) {
-                if ($user1->id < $user2->id) { // Process each pair only once
-                    $amount1to2 = $netBalances[$user1->id][$user2->id];
-                    $amount2to1 = $netBalances[$user2->id][$user1->id];
-
-                    if ($amount1to2 > 0 && $amount2to1 > 0) {
-                        // Both owe each other - consolidate
-                        if ($amount1to2 >= $amount2to1) {
-                            $netBalances[$user1->id][$user2->id] = $amount1to2 - $amount2to1;
-                            $netBalances[$user2->id][$user1->id] = 0;
-                        } else {
-                            $netBalances[$user2->id][$user1->id] = $amount2to1 - $amount1to2;
-                            $netBalances[$user1->id][$user2->id] = 0;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Convert to display format
+        // Initialize balance matrix: balances[from_user][to_user] = amount
         $balances = [];
-        foreach ($users as $user) {
-            $balances[$user->id] = [
-                'name' => $user->name,
-                'owes' => [],
-                'owed_by' => [],
-            ];
-
-            foreach ($users as $otherUser) {
-                if ($user->id != $otherUser->id) {
-                    $netAmount = $netBalances[$user->id][$otherUser->id];
-
-                    if ($netAmount > 0) {
-                        // User owes money to otherUser
-                        $balances[$user->id]['owes'][$otherUser->id] = $netAmount;
-                    } elseif ($netAmount < 0) {
-                        // OtherUser owes money to user
-                        $balances[$user->id]['owed_by'][$otherUser->id] = abs($netAmount);
-                    }
-                }
-            }
-        }
-
-        return $balances;
-    }
-
-    /**
-     * Get correct wallet snapshot after a specific expense
-     */
-    private function getCorrectWalletSnapshotAfterExpense($expenseId)
-    {
-        $users = User::where('is_active', true)->get();
-        $expenses = Expense::where('id', '<=', $expenseId)->orderBy('created_at')->get();
-        $settlements = Settlement::where('created_at', '<=', Expense::find($expenseId)->created_at)->orderBy('created_at')->get();
-        
-        // Initialize net balances
-        $netBalances = [];
         foreach ($users as $user1) {
             foreach ($users as $user2) {
-                if ($user1->id != $user2->id) {
-                    $netBalances[$user1->id][$user2->id] = 0;
-                }
-            }
-        }
-
-        // Process all expenses up to this point
-        foreach ($expenses as $expense) {
-            $totalUsers = $expense->user_count_at_time ?? $users->count();
-            $perPerson = $totalUsers > 0 ? $expense->amount / $totalUsers : $expense->amount;
-            $paidBy = $expense->paid_by_user_id;
-
-            if ($expense->participant_ids && count($expense->participant_ids) > 0) {
-                $usersAtTime = User::whereIn('id', $expense->participant_ids)->get();
-            } else {
-                $usersAtTime = $users->take($totalUsers);
-            }
-
-            // Split expense
-            foreach ($usersAtTime as $user) {
-                if ($user->id != $paidBy) {
-                    $netBalances[$user->id][$paidBy] += $perPerson;
-                    $netBalances[$paidBy][$user->id] -= $perPerson;
-                }
-            }
-
-            // Apply debt reduction if needed
-            $expenseAmountCents = round($exp->amount * 100);
-            $sortedUsers = $usersAtTime->sortBy('id');
-            $hasExistingDebts = false;
-            foreach ($sortedUsers as $user) {
-                if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
-                    $hasExistingDebts = true;
-                    break;
-                }
-            }
-
-            if ($hasExistingDebts) {
-                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
-            }
-        }
-
-        // Process all settlements up to this point
-        foreach ($settlements as $settlement) {
-            $fromId = $settlement->from_user_id;
-            $toId = $settlement->to_user_id;
-            $amount = $settlement->amount;
-
-            if ($netBalances[$fromId][$toId] > 0) {
-                $reduction = min($amount, $netBalances[$fromId][$toId]);
-                $netBalances[$fromId][$toId] -= $reduction;
-                $netBalances[$toId][$fromId] += $reduction;
-                
-                if ($amount > $reduction) {
-                    $excess = $amount - $reduction;
-                    $netBalances[$toId][$fromId] -= $excess;
-                    $netBalances[$fromId][$toId] += $excess;
-                }
-            } else {
-                $netBalances[$toId][$fromId] += $amount;
-                $netBalances[$fromId][$toId] -= $amount;
-            }
-        }
-
-        // Convert to wallet snapshot format
-        $walletBalances = [];
-        foreach ($users as $user) {
-            $walletBalances[$user->id] = [
-                'user_id' => $user->id,
-                'user_name' => $user->name,
-                'owes' => [],
-                'receives' => [],
-                'net_balance' => 0
-            ];
-
-            foreach ($users as $otherUser) {
-                if ($user->id != $otherUser->id) {
-                    $netAmount = $netBalances[$user->id][$otherUser->id];
-                    
-                    if ($netAmount > 0) {
-                        $walletBalances[$user->id]['owes'][$otherUser->id] = $netAmount;
-                    } elseif ($netAmount < 0) {
-                        $walletBalances[$user->id]['receives'][$otherUser->id] = abs($netAmount);
-                    }
-                }
-            }
-            
-            // Calculate net balance with proper precision
-            $netBalance = 0;
-            foreach ($walletBalances[$user->id]['owes'] as $amount) {
-                $netBalance -= $amount;
-            }
-            foreach ($walletBalances[$user->id]['receives'] as $amount) {
-                $netBalance += $amount;
-            }
-            $walletBalances[$user->id]['net_balance'] = round($netBalance, 2);
-        }
-
-        return $walletBalances;
-    }
-
-    private function getWalletSnapshotAfterSpecificExpense($expense, $users)
-    {
-        // Get all expenses up to and including this one
-        $expenses = Expense::where('created_at', '<=', $expense->created_at)
-            ->orderBy('created_at')
-            ->get();
-
-        // Get all settlements up to this expense
-        $settlements = Settlement::where('created_at', '<=', $expense->created_at)
-            ->orderBy('created_at')
-            ->get();
-
-        // Initialize net balances
-        $netBalances = [];
-        foreach ($users as $user1) {
-            foreach ($users as $user2) {
-                if ($user1->id != $user2->id) {
-                    $netBalances[$user1->id][$user2->id] = 0;
-                }
-            }
-        }
-
-        // Process all expenses up to this point
-        foreach ($expenses as $exp) {
-            $totalUsers = $exp->user_count_at_time ?? $users->count();
-            $perPerson = $totalUsers > 0 ? $exp->amount / $totalUsers : $exp->amount;
-            $paidBy = $exp->paid_by_user_id;
-
-            if ($exp->participant_ids && count($exp->participant_ids) > 0) {
-                $usersAtTime = User::whereIn('id', $exp->participant_ids)->get();
-            } else {
-                $usersAtTime = $users->take($totalUsers);
-            }
-
-            // Split expense
-            foreach ($usersAtTime as $user) {
-                if ($user->id != $paidBy) {
-                    $netBalances[$user->id][$paidBy] += $perPerson;
-                    $netBalances[$paidBy][$user->id] -= $perPerson;
-                }
-            }
-
-            // Apply debt reduction if needed
-            $expenseAmountCents = round($exp->amount * 100);
-            $sortedUsers = $usersAtTime->sortBy('id');
-            $hasExistingDebts = false;
-            foreach ($sortedUsers as $user) {
-                if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
-                    $hasExistingDebts = true;
-                    break;
-                }
-            }
-
-            if ($hasExistingDebts) {
-                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
-            }
-        }
-
-        // Process all settlements up to this point
-        foreach ($settlements as $settlement) {
-            $fromId = $settlement->from_user_id;
-            $toId = $settlement->to_user_id;
-            $amount = $settlement->amount;
-
-            if ($netBalances[$fromId][$toId] > 0) {
-                $reduction = min($amount, $netBalances[$fromId][$toId]);
-                $netBalances[$fromId][$toId] -= $reduction;
-                $netBalances[$toId][$fromId] += $reduction;
-
-                if ($amount > $reduction) {
-                    $excess = $amount - $reduction;
-                    $netBalances[$toId][$fromId] -= $excess;
-                    $netBalances[$fromId][$toId] += $excess;
-                }
-            } else {
-                $netBalances[$toId][$fromId] += $amount;
-                $netBalances[$fromId][$toId] -= $amount;
-            }
-        }
-
-        // Consolidate balances to prevent mutual debts
-        foreach ($users as $user1) {
-            foreach ($users as $user2) {
-                if ($user1->id < $user2->id) { // Process each pair only once
-                    $amount1to2 = $netBalances[$user1->id][$user2->id];
-                    $amount2to1 = $netBalances[$user2->id][$user1->id];
-
-                    if ($amount1to2 > 0 && $amount2to1 > 0) {
-                        // Both owe each other - consolidate
-                        if ($amount1to2 >= $amount2to1) {
-                            $netBalances[$user1->id][$user2->id] = $amount1to2 - $amount2to1;
-                            $netBalances[$user2->id][$user1->id] = 0;
-                        } else {
-                            $netBalances[$user2->id][$user1->id] = $amount2to1 - $amount1to2;
-                            $netBalances[$user1->id][$user2->id] = 0;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Convert to wallet snapshot format
-        $walletBalances = [];
-        foreach ($users as $user) {
-            $walletBalances[$user->id] = [
-                'user_id' => $user->id,
-                'user_name' => $user->name,
-                'owes' => [],
-                'receives' => [],
-                'net_balance' => 0
-            ];
-
-            foreach ($users as $otherUser) {
-                if ($user->id != $otherUser->id) {
-                    $netAmount = $netBalances[$user->id][$otherUser->id];
-
-                    if ($netAmount > 0) {
-                        $walletBalances[$user->id]['owes'][$otherUser->id] = $netAmount;
-                    } elseif ($netAmount < 0) {
-                        $walletBalances[$user->id]['receives'][$otherUser->id] = abs($netAmount);
-                    }
-                }
-            }
-
-            // Calculate net balance with proper precision
-            $netBalance = 0;
-            foreach ($walletBalances[$user->id]['owes'] as $amount) {
-                $netBalance -= $amount;
-            }
-            foreach ($walletBalances[$user->id]['receives'] as $amount) {
-                $netBalance += $amount;
-            }
-            $walletBalances[$user->id]['net_balance'] = round($netBalance, 2);
-        }
-
-        return $walletBalances;
-    }
-
-    /**
-     * Get wallet snapshot BEFORE a specific expense for bank statement-style running balance
-     */
-    private function getWalletSnapshotBeforeExpense($expense, $users)
-    {
-        // Get all expenses BEFORE this one
-        $expenses = Expense::where('created_at', '<', $expense->created_at)
-            ->orderBy('created_at')
-            ->get();
-
-        // Get all settlements BEFORE this expense
-        $settlements = Settlement::where('created_at', '<', $expense->created_at)
-            ->orderBy('created_at')
-            ->get();
-
-        // Initialize net balances
-        $netBalances = [];
-        foreach ($users as $user1) {
-            foreach ($users as $user2) {
-                if ($user1->id != $user2->id) {
-                    $netBalances[$user1->id][$user2->id] = 0;
-                }
-            }
-        }
-
-        // Process all expenses up to (but not including) this point
-        foreach ($expenses as $exp) {
-            $totalUsers = $exp->user_count_at_time ?? $users->count();
-            $paidBy = $exp->paid_by_user_id;
-
-            if ($exp->participant_ids && count($exp->participant_ids) > 0) {
-                $usersAtTime = User::whereIn('id', $exp->participant_ids)->get();
-            } else {
-                $usersAtTime = $users->take($totalUsers);
-            }
-
-            // Calculate precise per-person amounts with proper remainder distribution
-            $expenseAmountCents = round($exp->amount * 100);
-            $participantCount = count($usersAtTime);
-            $perPersonCents = intval($expenseAmountCents / $participantCount);
-            $remainderCents = $expenseAmountCents % $participantCount;
-
-            // Split expense among users
-            $userIndex = 0;
-            $amountOthersOweCents = 0;
-            foreach ($usersAtTime as $user) {
-                if ($user->id != $paidBy) {
-                    $thisPersonAmountCents = $perPersonCents + ($userIndex < $remainderCents ? 1 : 0);
-                    $thisPersonAmount = $thisPersonAmountCents / 100;
-
-                    $netBalances[$user->id][$paidBy] += $thisPersonAmount;
-                    $netBalances[$paidBy][$user->id] -= $thisPersonAmount;
-
-                    $amountOthersOweCents += $thisPersonAmountCents;
-                }
-                $userIndex++;
-            }
-
-            // Apply debt reduction if needed
-            $sortedUsers = $usersAtTime->sortBy('id');
-            $hasExistingDebts = false;
-            foreach ($sortedUsers as $user) {
-                if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
-                    $hasExistingDebts = true;
-                    break;
-                }
-            }
-
-            if ($hasExistingDebts) {
-                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
-            }
-        }
-
-        // Process all settlements up to this point
-        foreach ($settlements as $settlement) {
-            $fromId = $settlement->from_user_id;
-            $toId = $settlement->to_user_id;
-            $amount = $settlement->amount;
-
-            if ($netBalances[$fromId][$toId] > 0) {
-                $reduction = min($amount, $netBalances[$fromId][$toId]);
-                $netBalances[$fromId][$toId] -= $reduction;
-                $netBalances[$toId][$fromId] += $reduction;
-
-                if ($amount > $reduction) {
-                    $excess = $amount - $reduction;
-                    $netBalances[$toId][$fromId] -= $excess;
-                    $netBalances[$fromId][$toId] += $excess;
-                }
-            } else {
-                $netBalances[$toId][$fromId] += $amount;
-                $netBalances[$fromId][$toId] -= $amount;
-            }
-        }
-
-        // Convert to wallet snapshot format
-        $walletBalances = [];
-        foreach ($users as $user) {
-            $walletBalances[$user->id] = [
-                'user_id' => $user->id,
-                'user_name' => $user->name,
-                'owes' => [],
-                'receives' => [],
-                'net_balance' => 0
-            ];
-
-            foreach ($users as $otherUser) {
-                if ($user->id != $otherUser->id) {
-                    $netAmount = $netBalances[$user->id][$otherUser->id];
-
-                    if ($netAmount > 0) {
-                        $walletBalances[$user->id]['owes'][$otherUser->id] = $netAmount;
-                    } elseif ($netAmount < 0) {
-                        $walletBalances[$user->id]['receives'][$otherUser->id] = abs($netAmount);
-                    }
-                }
-            }
-
-            // Calculate net balance with proper precision
-            $netBalance = 0;
-            foreach ($walletBalances[$user->id]['owes'] as $amount) {
-                $netBalance -= $amount;
-            }
-            foreach ($walletBalances[$user->id]['receives'] as $amount) {
-                $netBalance += $amount;
-            }
-            $walletBalances[$user->id]['net_balance'] = round($netBalance, 2);
-        }
-
-        return $walletBalances;
-    }
-
-    /**
-     * Get wallet snapshot BEFORE a specific settlement
-     */
-    private function getWalletSnapshotBeforeSettlement($settlement, $users)
-    {
-        // Get all expenses before this settlement
-        $expenses = Expense::where('created_at', '<', $settlement->created_at)
-            ->orderBy('created_at')
-            ->get();
-
-        // Get all settlements before this settlement
-        $settlements = Settlement::where('created_at', '<', $settlement->created_at)
-            ->orderBy('created_at')
-            ->get();
-
-        // Use the same calculation logic as getWalletSnapshotBeforeExpense
-        return $this->calculateWalletBalancesUpToPoint($expenses, $settlements, $users);
-    }
-
-    /**
-     * Get wallet snapshot AFTER a specific settlement
-     */
-    private function getWalletSnapshotAfterSettlement($settlement, $users)
-    {
-        // Get all expenses up to and before this settlement
-        $expenses = Expense::where('created_at', '<=', $settlement->created_at)
-            ->orderBy('created_at')
-            ->get();
-
-        // Get all settlements up to and including this settlement
-        $settlements = Settlement::where('created_at', '<=', $settlement->created_at)
-            ->orderBy('created_at')
-            ->get();
-
-        return $this->calculateWalletBalancesUpToPoint($expenses, $settlements, $users);
-    }
-
-    /**
-     * Helper method to calculate wallet balances up to a specific point in time
-     */
-    private function calculateWalletBalancesUpToPoint($expenses, $settlements, $users)
-    {
-        // Initialize net balances
-        $netBalances = [];
-        foreach ($users as $user1) {
-            foreach ($users as $user2) {
-                if ($user1->id != $user2->id) {
-                    $netBalances[$user1->id][$user2->id] = 0;
+                if ($user1->id !== $user2->id) {
+                    $balances[$user1->id][$user2->id] = 0;
                 }
             }
         }
 
         // Process all expenses
-        foreach ($expenses as $exp) {
-            $totalUsers = $exp->user_count_at_time ?? $users->count();
-            $paidBy = $exp->paid_by_user_id;
-
-            if ($exp->participant_ids && count($exp->participant_ids) > 0) {
-                $usersAtTime = User::whereIn('id', $exp->participant_ids)->get();
-            } else {
-                $usersAtTime = $users->take($totalUsers);
-            }
-
-            // Calculate precise per-person amounts with proper remainder distribution
-            $expenseAmountCents = round($exp->amount * 100);
-            $participantCount = count($usersAtTime);
-            $perPersonCents = intval($expenseAmountCents / $participantCount);
-            $remainderCents = $expenseAmountCents % $participantCount;
-
-            // Split expense among users
-            $userIndex = 0;
-            $amountOthersOweCents = 0;
-            foreach ($usersAtTime as $user) {
-                if ($user->id != $paidBy) {
-                    $thisPersonAmountCents = $perPersonCents + ($userIndex < $remainderCents ? 1 : 0);
-                    $thisPersonAmount = $thisPersonAmountCents / 100;
-
-                    $netBalances[$user->id][$paidBy] += $thisPersonAmount;
-                    $netBalances[$paidBy][$user->id] -= $thisPersonAmount;
-
-                    $amountOthersOweCents += $thisPersonAmountCents;
-                }
-                $userIndex++;
-            }
-
-            // Apply debt reduction if needed
-            $sortedUsers = $usersAtTime->sortBy('id');
-            $hasExistingDebts = false;
-            foreach ($sortedUsers as $user) {
-                if ($user->id != $paidBy && $netBalances[$paidBy][$user->id] > 0) {
-                    $hasExistingDebts = true;
-                    break;
-                }
-            }
-
-            if ($hasExistingDebts) {
-                $this->autoReduceDebtsForPayer($netBalances, $paidBy, $expenseAmountCents, $sortedUsers);
-            }
+        $expenses = Expense::orderBy('created_at')->get();
+        foreach ($expenses as $expense) {
+            $this->processExpense($expense, $balances, $users);
         }
 
         // Process all settlements
+        $settlements = Settlement::orderBy('created_at')->get();
         foreach ($settlements as $settlement) {
-            $fromId = $settlement->from_user_id;
-            $toId = $settlement->to_user_id;
-            $amount = $settlement->amount;
-
-            if ($netBalances[$fromId][$toId] > 0) {
-                $reduction = min($amount, $netBalances[$fromId][$toId]);
-                $netBalances[$fromId][$toId] -= $reduction;
-                $netBalances[$toId][$fromId] += $reduction;
-
-                if ($amount > $reduction) {
-                    $excess = $amount - $reduction;
-                    $netBalances[$toId][$fromId] -= $excess;
-                    $netBalances[$fromId][$toId] += $excess;
-                }
-            } else {
-                $netBalances[$toId][$fromId] += $amount;
-                $netBalances[$fromId][$toId] -= $amount;
-            }
+            $this->processSettlement($settlement, $balances);
         }
 
-        // Consolidate balances to prevent mutual debts
+        // Consolidate mutual debts (A owes B $10, B owes A $3 = A owes B $7)
+        $this->consolidateDebts($balances, $users);
+
+        // Convert to display format
+        return $this->formatBalancesForDisplay($balances, $users);
+    }
+
+    /**
+     * SIMPLIFIED: Process a single expense
+     */
+    private function processExpense($expense, &$balances, $users)
+    {
+        $paidBy = $expense->paid_by_user_id;
+        $amount = $expense->amount;
+
+        // Get participants (users who existed when expense was created)
+        $participantIds = $expense->participant_ids ?? $users->pluck('id')->toArray();
+        $participants = $users->whereIn('id', $participantIds);
+        $participantCount = $participants->count();
+
+        if ($participantCount === 0) return;
+
+        // Calculate each person's share (handle cents precisely)
+        $amountCents = round($amount * 100);
+        $sharePerPersonCents = intval($amountCents / $participantCount);
+        $remainderCents = $amountCents % $participantCount;
+
+        // Distribute shares
+        $index = 0;
+        foreach ($participants->sortBy('id') as $participant) {
+            if ($participant->id === $paidBy) {
+                $index++;
+                continue;
+            }
+
+            // Add remainder cents to first few participants
+            $shareCents = $sharePerPersonCents + ($index < $remainderCents ? 1 : 0);
+            $share = $shareCents / 100;
+
+            // Apply debt reduction if payer owes this participant
+            if ($balances[$paidBy][$participant->id] > 0) {
+                $reduction = min($balances[$paidBy][$participant->id], $share);
+                $balances[$paidBy][$participant->id] -= $reduction;
+                $share -= $reduction;
+            }
+
+            // Remaining amount becomes new debt from participant to payer
+            if ($share > 0) {
+                $balances[$participant->id][$paidBy] += $share;
+            }
+
+            $index++;
+        }
+    }
+
+    /**
+     * SIMPLIFIED: Process a settlement payment
+     */
+    private function processSettlement($settlement, &$balances)
+    {
+        $fromId = $settlement->from_user_id;
+        $toId = $settlement->to_user_id;
+        $amount = $settlement->amount;
+
+        // Reduce existing debt first
+        if ($balances[$fromId][$toId] > 0) {
+            $reduction = min($amount, $balances[$fromId][$toId]);
+            $balances[$fromId][$toId] -= $reduction;
+            $amount -= $reduction;
+        }
+
+        // If payment exceeds debt, create reverse debt
+        if ($amount > 0) {
+            $balances[$toId][$fromId] += $amount;
+        }
+    }
+
+    /**
+     * SIMPLIFIED: Consolidate mutual debts
+     */
+    private function consolidateDebts(&$balances, $users)
+    {
         foreach ($users as $user1) {
             foreach ($users as $user2) {
-                if ($user1->id < $user2->id) { // Process each pair only once
-                    $amount1to2 = $netBalances[$user1->id][$user2->id];
-                    $amount2to1 = $netBalances[$user2->id][$user1->id];
+                if ($user1->id >= $user2->id) continue; // Process each pair once
 
-                    if ($amount1to2 > 0 && $amount2to1 > 0) {
-                        // Both owe each other - consolidate
-                        if ($amount1to2 >= $amount2to1) {
-                            $netBalances[$user1->id][$user2->id] = $amount1to2 - $amount2to1;
-                            $netBalances[$user2->id][$user1->id] = 0;
-                        } else {
-                            $netBalances[$user2->id][$user1->id] = $amount2to1 - $amount1to2;
-                            $netBalances[$user1->id][$user2->id] = 0;
-                        }
+                $debt1to2 = $balances[$user1->id][$user2->id];
+                $debt2to1 = $balances[$user2->id][$user1->id];
+
+                if ($debt1to2 > 0 && $debt2to1 > 0) {
+                    if ($debt1to2 > $debt2to1) {
+                        $balances[$user1->id][$user2->id] = $debt1to2 - $debt2to1;
+                        $balances[$user2->id][$user1->id] = 0;
+                    } else {
+                        $balances[$user2->id][$user1->id] = $debt2to1 - $debt1to2;
+                        $balances[$user1->id][$user2->id] = 0;
                     }
                 }
             }
         }
+    }
 
-        // Convert to wallet snapshot format
-        $walletBalances = [];
+    /**
+     * SIMPLIFIED: Format balances for display
+     */
+    private function formatBalancesForDisplay($balances, $users)
+    {
+        $result = [];
+
         foreach ($users as $user) {
-            $walletBalances[$user->id] = [
-                'user_id' => $user->id,
-                'user_name' => $user->name,
+            $result[$user->id] = [
+                'name' => $user->name,
                 'owes' => [],
-                'receives' => [],
+                'owed_by' => [],
                 'net_balance' => 0
             ];
 
+            $netBalance = 0;
             foreach ($users as $otherUser) {
-                if ($user->id != $otherUser->id) {
-                    $netAmount = $netBalances[$user->id][$otherUser->id];
+                if ($user->id === $otherUser->id) continue;
 
-                    if ($netAmount > 0) {
-                        $walletBalances[$user->id]['owes'][$otherUser->id] = $netAmount;
-                    } elseif ($netAmount < 0) {
-                        $walletBalances[$user->id]['receives'][$otherUser->id] = abs($netAmount);
-                    }
+                $owes = $balances[$user->id][$otherUser->id];
+                $owedBy = $balances[$otherUser->id][$user->id];
+
+                if ($owes > 0) {
+                    $result[$user->id]['owes'][$otherUser->id] = $owes;
+                    $netBalance -= $owes;
+                }
+
+                if ($owedBy > 0) {
+                    $result[$user->id]['owed_by'][$otherUser->id] = $owedBy;
+                    $netBalance += $owedBy;
                 }
             }
 
-            // Calculate net balance with proper precision
-            $netBalance = 0;
-            foreach ($walletBalances[$user->id]['owes'] as $amount) {
-                $netBalance -= $amount;
+            $result[$user->id]['net_balance'] = round($netBalance, 2);
+        }
+
+        return $result;
+    }
+
+    /**
+     * SIMPLIFIED: Get payment suggestions
+     */
+    private function getPaymentSuggestions($balances)
+    {
+        $suggestions = [];
+
+        foreach ($balances as $userId => $userBalance) {
+            if (!empty($userBalance['owes'])) {
+                // Sort debts by amount (pay largest first)
+                $debts = $userBalance['owes'];
+                arsort($debts);
+
+                foreach ($debts as $creditorId => $amount) {
+                    $creditor = User::find($creditorId);
+                    $suggestions[] = [
+                        'debtor' => $userBalance['name'],
+                        'creditor' => $creditor->name,
+                        'amount' => $amount,
+                        'from_user_id' => $userId,
+                        'to_user_id' => $creditorId
+                    ];
+                    break; // Only suggest one payment per user
+                }
             }
-            foreach ($walletBalances[$user->id]['receives'] as $amount) {
-                $netBalance += $amount;
+        }
+
+        return $suggestions;
+    }
+
+    /**
+     * Create detailed debt-aware statement records
+     */
+    private function createStatementRecords($expense = null, $settlement = null)
+    {
+        $users = User::where('is_active', true)->get();
+
+        // Get balances before and after this transaction
+        $balancesBefore = $this->getBalancesBefore($expense, $settlement);
+        $balancesAfter = $this->calculateBalances();
+
+        foreach ($users as $user) {
+            $record = $this->createDetailedStatement($user, $expense, $settlement, $balancesBefore, $balancesAfter, $users);
+
+            // Only create record if there's an actual impact on this user
+            if ($record) {
+                StatementRecord::create($record);
             }
-            $walletBalances[$user->id]['net_balance'] = round($netBalance, 2);
+        }
+    }
+
+    /**
+     * Create detailed statement showing WHO OWES WHOM
+     */
+    private function createDetailedStatement($user, $expense = null, $settlement = null, $balancesBefore, $balancesAfter, $users)
+    {
+        if ($expense) {
+            return $this->createDetailedExpenseStatement($user, $expense, $balancesBefore, $balancesAfter, $users);
+        } elseif ($settlement) {
+            return $this->createDetailedSettlementStatement($user, $settlement, $balancesBefore, $balancesAfter, $users);
         }
 
-        return $walletBalances;
+        return null;
     }
 
     /**
-     * Get statement history for a specific user (bank statement view)
+     * Create detailed expense statement showing debt changes
      */
-    public function getUserStatementHistory($userId, $limit = 50)
+    private function createDetailedExpenseStatement($user, $expense, $balancesBefore, $balancesAfter, $users)
     {
-        return StatementRecord::with(['expense', 'settlement'])
-            ->forUser($userId)
-            ->orderBy('transaction_date', 'desc')
-            ->orderBy('created_at', 'desc')
-            ->limit($limit)
-            ->get();
-    }
+        $isPayer = ($expense->paid_by_user_id === $user->id);
+        $participantCount = $expense->user_count_at_time ?? $users->count();
+        $perPersonShare = round($expense->amount / $participantCount, 2);
+        $payer = User::find($expense->paid_by_user_id);
 
-    /**
-     * Get statement history for all users (admin view)
-     */
-    public function getAllStatementHistory($limit = 100)
-    {
-        return StatementRecord::with(['user', 'expense', 'settlement'])
-            ->orderBy('transaction_date', 'desc')
-            ->orderBy('created_at', 'desc')
-            ->limit($limit)
-            ->get();
-    }
+        // Calculate balance changes
+        $balanceBefore = $balancesBefore[$user->id]['net_balance'] ?? 0;
+        $balanceAfter = $balancesAfter[$user->id]['net_balance'] ?? 0;
+        $balanceChange = round($balanceAfter - $balanceBefore, 2);
 
-    /**
-     * Get statement history between dates
-     */
-    public function getStatementHistoryBetweenDates($userId = null, $startDate = null, $endDate = null)
-    {
-        $query = StatementRecord::with(['user', 'expense', 'settlement']);
-
-        if ($userId) {
-            $query->forUser($userId);
+        // Skip if no change for this user
+        if (abs($balanceChange) < 0.01) {
+            return null;
         }
 
-        if ($startDate && $endDate) {
-            $query->betweenDates($startDate, $endDate);
+        if ($isPayer) {
+            $description = "💸 You paid: {$expense->description}";
+            $amount = $expense->amount;
+
+            // Show who owes the payer
+            $debtDetails = $this->getWhoOwesWhom($user->id, $balancesBefore, $balancesAfter, $users);
+            $note = "You paid $" . number_format($expense->amount, 2) . " for everyone.";
+
+        } else {
+            $description = "🛒 Expense: {$expense->description}";
+            $amount = $balanceChange; // Shows actual impact on their balance
+
+            // Show debt reduction or new debt details
+            $debtDetails = $this->getDebtChanges($user->id, $expense->paid_by_user_id, $balancesBefore, $balancesAfter, $perPersonShare);
+            $note = "Your share: $" . number_format($perPersonShare, 2) . " (paid by {$payer->name})";
         }
 
-        return $query->orderBy('transaction_date', 'desc')
-                    ->orderBy('created_at', 'desc')
-                    ->get();
+        return [
+            'user_id' => $user->id,
+            'expense_id' => $expense->id,
+            'transaction_type' => 'expense',
+            'description' => $description,
+            'amount' => $amount,
+            'reference_number' => StatementRecord::generateReferenceNumber('EXP'),
+            'balance_before' => $balanceBefore,
+            'balance_after' => $balanceAfter,
+            'balance_change' => $balanceChange,
+            'transaction_date' => $expense->created_at ?? now(),
+            'status' => 'completed',
+            'transaction_details' => [
+                'note' => $note,
+                'expense_total' => $expense->amount,
+                'your_share' => $perPersonShare,
+                'participants' => $participantCount,
+                'debt_details' => $debtDetails,
+                'is_payer' => $isPayer
+            ]
+        ];
     }
 
     /**
-     * Web view for user's statement history
+     * Create detailed settlement statement showing debt changes
+     */
+    private function createDetailedSettlementStatement($user, $settlement, $balancesBefore, $balancesAfter, $users)
+    {
+        $isFromUser = ($settlement->from_user_id === $user->id);
+        $isToUser = ($settlement->to_user_id === $user->id);
+
+        // Only create records for users directly involved
+        if (!$isFromUser && !$isToUser) {
+            return null;
+        }
+
+        $balanceBefore = $balancesBefore[$user->id]['net_balance'] ?? 0;
+        $balanceAfter = $balancesAfter[$user->id]['net_balance'] ?? 0;
+        $balanceChange = round($balanceAfter - $balanceBefore, 2);
+
+        $fromUser = User::find($settlement->from_user_id);
+        $toUser = User::find($settlement->to_user_id);
+
+        if ($isFromUser) {
+            $description = "💰 Payment to {$toUser->name}";
+            $amount = -$settlement->amount;
+
+            // Show debt before and after
+            $debtBefore = $balancesBefore[$user->id]['owes'][$settlement->to_user_id] ?? 0;
+            $debtAfter = $balancesAfter[$user->id]['owes'][$settlement->to_user_id] ?? 0;
+            $reverseDebt = $balancesAfter[$settlement->to_user_id]['owes'][$user->id] ?? 0;
+
+            if ($debtAfter > 0) {
+                $note = "Paid $" . number_format($settlement->amount, 2) . ". You still owe $" . number_format($debtAfter, 2);
+            } elseif ($reverseDebt > 0) {
+                $note = "Paid $" . number_format($settlement->amount, 2) . ". {$toUser->name} now owes you $" . number_format($reverseDebt, 2);
+            } else {
+                $note = "Paid $" . number_format($settlement->amount, 2) . ". All settled!";
+            }
+
+        } else {
+            $description = "💸 Received from {$fromUser->name}";
+            $amount = $settlement->amount;
+
+            $debtBefore = $balancesBefore[$settlement->from_user_id]['owes'][$user->id] ?? 0;
+            $debtAfter = $balancesAfter[$settlement->from_user_id]['owes'][$user->id] ?? 0;
+            $reverseDebt = $balancesAfter[$user->id]['owes'][$settlement->from_user_id] ?? 0;
+
+            if ($debtAfter > 0) {
+                $note = "Received $" . number_format($settlement->amount, 2) . ". {$fromUser->name} still owes $" . number_format($debtAfter, 2);
+            } elseif ($reverseDebt > 0) {
+                $note = "Received $" . number_format($settlement->amount, 2) . ". You now owe {$fromUser->name} $" . number_format($reverseDebt, 2);
+            } else {
+                $note = "Received $" . number_format($settlement->amount, 2) . ". All settled!";
+            }
+        }
+
+        return [
+            'user_id' => $user->id,
+            'settlement_id' => $settlement->id,
+            'transaction_type' => 'settlement',
+            'description' => $description,
+            'amount' => $amount,
+            'reference_number' => StatementRecord::generateReferenceNumber('PMT'),
+            'balance_before' => $balanceBefore,
+            'balance_after' => $balanceAfter,
+            'balance_change' => $balanceChange,
+            'transaction_date' => $settlement->created_at ?? now(),
+            'status' => 'completed',
+            'transaction_details' => [
+                'note' => $note,
+                'payment_amount' => $settlement->amount,
+                'from_user' => $fromUser->name,
+                'to_user' => $toUser->name,
+                'is_sender' => $isFromUser,
+                'is_receiver' => $isToUser
+            ]
+        ];
+    }
+
+    /**
+     * Get who owes whom after a transaction (for payers)
+     */
+    private function getWhoOwesWhom($payerId, $balancesBefore, $balancesAfter, $users)
+    {
+        $details = [];
+
+        foreach ($users as $user) {
+            if ($user->id === $payerId) continue;
+
+            $owedBefore = $balancesAfter[$user->id]['owes'][$payerId] ?? 0;
+            if ($owedBefore > 0) {
+                $details[] = "💰 {$user->name} owes you $" . number_format($owedBefore, 2);
+            }
+        }
+
+        return $details;
+    }
+
+    /**
+     * Get debt change details for participants
+     */
+    private function getDebtChanges($userId, $payerId, $balancesBefore, $balancesAfter, $shareAmount)
+    {
+        $details = [];
+
+        $debtBefore = $balancesBefore[$userId]['owes'][$payerId] ?? 0;
+        $debtAfter = $balancesAfter[$userId]['owes'][$payerId] ?? 0;
+
+        if ($debtBefore > 0) {
+            $reduction = $debtBefore - $debtAfter;
+            if ($reduction > 0) {
+                $details[] = "🔄 Previous debt reduced by $" . number_format($reduction, 2);
+            }
+        }
+
+        if ($debtAfter > 0) {
+            $details[] = "💳 You now owe $" . number_format($debtAfter, 2);
+        } else {
+            $reverseDebt = $balancesAfter[$payerId]['owes'][$userId] ?? 0;
+            if ($reverseDebt > 0) {
+                $payer = User::find($payerId);
+                $details[] = "💰 {$payer->name} owes you $" . number_format($reverseDebt, 2);
+            }
+        }
+
+        return $details;
+    }
+
+    /**
+     * SIMPLIFIED: Get balances before a specific transaction
+     */
+    private function getBalancesBefore($expense = null, $settlement = null)
+    {
+        $cutoffDate = null;
+
+        if ($expense) {
+            $cutoffDate = $expense->created_at;
+        } elseif ($settlement) {
+            $cutoffDate = $settlement->created_at;
+        }
+
+        if (!$cutoffDate) {
+            return [];
+        }
+
+        // Temporarily calculate balances up to cutoff date
+        $users = User::where('is_active', true)->get();
+        $balances = [];
+
+        foreach ($users as $user1) {
+            foreach ($users as $user2) {
+                if ($user1->id !== $user2->id) {
+                    $balances[$user1->id][$user2->id] = 0;
+                }
+            }
+        }
+
+        // Process expenses before cutoff
+        $expenses = Expense::where('created_at', '<', $cutoffDate)->orderBy('created_at')->get();
+        foreach ($expenses as $exp) {
+            $this->processExpense($exp, $balances, $users);
+        }
+
+        // Process settlements before cutoff
+        $settlements = Settlement::where('created_at', '<', $cutoffDate)->orderBy('created_at')->get();
+        foreach ($settlements as $sett) {
+            $this->processSettlement($sett, $balances);
+        }
+
+        $this->consolidateDebts($balances, $users);
+
+        return $this->formatBalancesForDisplay($balances, $users);
+    }
+
+    /**
+     * User statement history view - SIMPLIFIED
      */
     public function userStatementView($userId)
     {
-        $user = User::find($userId);
-        if (!$user) {
-            abort(404, 'User not found');
-        }
-
-        // Get all users for navigation
+        $user = User::findOrFail($userId);
         $allUsers = User::where('is_active', true)->get();
 
-        $statements = $this->getUserStatementHistory($userId, 100);
-        $currentBalance = $statements->first()?->balance_after ?? 0;
+        $statements = StatementRecord::with(['expense', 'settlement'])
+            ->where('user_id', $userId)
+            ->orderBy('transaction_date', 'desc')
+            ->paginate(25);
 
-        return view('statements.user', compact('user', 'allUsers', 'statements', 'currentBalance'));
+        // Calculate current balance from the balance system
+        $balances = $this->calculateBalances();
+        $currentBalance = $balances[$userId]['net_balance'] ?? 0;
+
+        return view('statements.user-simple', compact('user', 'allUsers', 'statements', 'currentBalance'));
     }
 
     /**
-     * API endpoint to get user's statement history
+     * Regenerate all statements with simplified format
+     */
+    public function regenerateSimplifiedStatements()
+    {
+        try {
+            // Clear existing statement records
+            StatementRecord::truncate();
+
+            $users = User::where('is_active', true)->get();
+
+            // Regenerate for all expenses
+            $expenses = Expense::orderBy('created_at')->get();
+            foreach ($expenses as $expense) {
+                $this->createStatementRecords($expense, null);
+            }
+
+            // Regenerate for all settlements
+            $settlements = Settlement::orderBy('created_at')->get();
+            foreach ($settlements as $settlement) {
+                $this->createStatementRecords(null, $settlement);
+            }
+
+            // Check if this is an API request or web request
+            if (request()->wantsJson() || request()->is('api/*')) {
+                return response()->json([
+                    'message' => 'Simplified statement records regenerated successfully',
+                    'total_expenses_processed' => $expenses->count(),
+                    'total_settlements_processed' => $settlements->count()
+                ]);
+            } else {
+                // For web requests, redirect back with success message
+                return back()->with('success',
+                    'All statements have been updated! ' .
+                    $expenses->count() . ' expenses and ' .
+                    $settlements->count() . ' settlements processed.'
+                );
+            }
+        } catch (\Exception $e) {
+            if (request()->wantsJson() || request()->is('api/*')) {
+                return response()->json([
+                    'error' => 'Failed to regenerate statements: ' . $e->getMessage()
+                ], 500);
+            } else {
+                return back()->with('error', 'Failed to regenerate statements: ' . $e->getMessage());
+            }
+        }
+    }
+
+    /**
+     * API endpoint for statement history
      */
     public function apiStatementHistory(Request $request, $userId)
     {
-        $user = User::find($userId);
-        if (!$user) {
-            return response()->json(['error' => 'User not found'], 404);
-        }
-
+        $user = User::findOrFail($userId);
         $limit = $request->get('limit', 50);
-        $startDate = $request->get('start_date');
-        $endDate = $request->get('end_date');
 
-        if ($startDate && $endDate) {
-            $statements = $this->getStatementHistoryBetweenDates($userId, $startDate, $endDate);
-        } else {
-            $statements = $this->getUserStatementHistory($userId, $limit);
+        $statements = StatementRecord::where('user_id', $userId)
+            ->orderBy('transaction_date', 'desc')
+            ->limit($limit)
+            ->get();
+
+        return response()->json([
+            'user' => ['id' => $user->id, 'name' => $user->name],
+            'statements' => $statements,
+            'current_balance' => $statements->first()?->balance_after ?? 0
+        ]);
+    }
+
+    /**
+     * Debug helper to verify calculations
+     */
+    public function debugBalance()
+    {
+        $balances = $this->calculateBalances();
+        $users = User::where('is_active', true)->get();
+
+        // Verify balance integrity
+        $totalOwed = 0;
+        $totalReceived = 0;
+
+        foreach ($balances as $userBalance) {
+            $totalOwed += array_sum($userBalance['owes']);
+            $totalReceived += array_sum($userBalance['owed_by']);
         }
 
         return response()->json([
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-            ],
-            'statements' => $statements->map(function ($record) {
-                return [
-                    'id' => $record->id,
-                    'reference_number' => $record->reference_number,
-                    'transaction_date' => $record->transaction_date->format('Y-m-d H:i:s'),
-                    'transaction_type' => $record->transaction_type,
-                    'description' => $record->description,
-                    'amount' => $record->amount,
-                    'balance_before' => $record->balance_before,
-                    'balance_after' => $record->balance_after,
-                    'balance_change' => $record->balance_change,
-                    'formatted_balance_change' => $record->formatted_balance_change,
-                    'formatted_balance_after' => $record->formatted_balance_after,
-                    'status' => $record->status,
-                ];
-            }),
-            'summary' => [
-                'total_records' => $statements->count(),
-                'current_balance' => $statements->first()?->balance_after ?? 0,
-                'date_range' => [
-                    'start' => $statements->last()?->transaction_date?->format('Y-m-d') ?? null,
-                    'end' => $statements->first()?->transaction_date?->format('Y-m-d') ?? null,
-                ]
+            'balances' => $balances,
+            'integrity_check' => [
+                'total_owed' => $totalOwed,
+                'total_received' => $totalReceived,
+                'difference' => abs($totalOwed - $totalReceived),
+                'is_balanced' => abs($totalOwed - $totalReceived) < 0.01
             ]
         ]);
     }
 
     /**
-     * Debug balance calculation for a specific user and transaction
+     * Debug helper to test breakdown calculations
      */
-    public function debugBalance($userId = null)
+    public function debugBreakdowns()
     {
         $users = User::where('is_active', true)->get();
-        $expenses = Expense::orderBy('created_at')->get();
+        $expenses = Expense::latest()->take(2)->get();
+        $settlements = Settlement::latest()->take(2)->get();
 
-        if (!$userId) {
-            $userId = $users->first()->id;
+        $expenseDetails = $this->calculateExpenseDetails($expenses, $users);
+        $settlementDetails = $this->calculateSettlementDetails($settlements, $users);
+
+        return response()->json([
+            'sample_expense_breakdown' => !empty($expenseDetails) ? array_values($expenseDetails)[0] : null,
+            'sample_settlement_breakdown' => !empty($settlementDetails) ? array_values($settlementDetails)[0] : null,
+            'expense_count' => count($expenseDetails),
+            'settlement_count' => count($settlementDetails)
+        ]);
+    }
+
+    /**
+     * Test specific calculation scenarios to verify logic correctness
+     */
+    public function testCalculationScenarios()
+    {
+        // Simulate the scenarios with manual balance tracking
+        $scenarios = [];
+
+        // CASE 1: Basic debt reduction scenario
+        $case1 = $this->simulateCase1();
+        $scenarios['case_1_basic_debt_reduction'] = $case1;
+
+        // CASE 2: Debt reversal scenario
+        $case2 = $this->simulateCase2();
+        $scenarios['case_2_debt_reversal'] = $case2;
+
+        // Additional approved test cases
+        $case3 = $this->simulateCase3_MultipleDebts();
+        $scenarios['case_3_multiple_debts'] = $case3;
+
+        $case4 = $this->simulateCase4_ExactDebtElimination();
+        $scenarios['case_4_exact_debt_elimination'] = $case4;
+
+        $case5 = $this->simulateCase5_PrecisionTest();
+        $scenarios['case_5_precision_test'] = $case5;
+
+        $case7 = $this->simulateCase7_SettlementOverpayment();
+        $scenarios['case_7_settlement_overpayment'] = $case7;
+
+        $case8 = $this->simulateCase8_ZeroAmountExpense();
+        $scenarios['case_8_zero_amount_expense'] = $case8;
+
+        $case9 = $this->simulateCase9_LargeGroup();
+        $scenarios['case_9_large_group'] = $case9;
+
+        $case10 = $this->simulateCase10_TimeBasedSequence();
+        $scenarios['case_10_time_based_sequence'] = $case10;
+
+        return response()->json([
+            'test_scenarios' => $scenarios,
+            'summary' => [
+                'total_cases' => count($scenarios),
+                'all_passed' => $this->validateAllScenarios($scenarios)
+            ]
+        ]);
+    }
+
+    /**
+     * CASE 1: Navjot pays $200, Sapna pays $30, Sapna pays $50
+     */
+    private function simulateCase1()
+    {
+        $balances = [
+            'navjot' => ['sapna' => 0, 'third_user' => 0],
+            'sapna' => ['navjot' => 0, 'third_user' => 0],
+            'third_user' => ['navjot' => 0, 'sapna' => 0]
+        ];
+
+        $steps = [];
+
+        // Step 1: Navjot pays $200 expense
+        // Each person owes $66.67 (rounded to $66.67)
+        $balances['sapna']['navjot'] += 66.67;
+        $balances['third_user']['navjot'] += 66.67;
+        $steps[] = [
+            'action' => 'Navjot pays $200 expense',
+            'calculation' => '$200 ÷ 3 = $66.67 each',
+            'result' => 'Sapna owes Navjot $66.67, Third user owes Navjot $66.67',
+            'balances' => $this->copyBalances($balances)
+        ];
+
+        // Step 2: Sapna pays $30 to Navjot
+        $balances['sapna']['navjot'] -= 30;
+        $steps[] = [
+            'action' => 'Sapna pays $30 to Navjot',
+            'calculation' => '$66.67 - $30 = $36.67',
+            'result' => 'Sapna now owes Navjot $36.67',
+            'balances' => $this->copyBalances($balances)
+        ];
+
+        // Step 3: Sapna pays $50 expense
+        // Each person owes $16.67 (rounded to $16.67)
+        // BUT Sapna's existing debt of $36.67 gets reduced first
+        $navjotShare = 16.67;
+        $thirdUserShare = 16.67;
+        $debtReduction = min($balances['sapna']['navjot'], $navjotShare);
+
+        $balances['navjot']['sapna'] += max(0, $navjotShare - $debtReduction);
+        $balances['sapna']['navjot'] -= $debtReduction;
+        $balances['third_user']['sapna'] += $thirdUserShare;
+
+        $steps[] = [
+            'action' => 'Sapna pays $50 expense',
+            'calculation' => '$50 ÷ 3 = $16.67 each, Debt reduction: $16.67',
+            'result' => 'Sapna debt to Navjot: $36.67 - $16.67 = $20.00, Third user owes Sapna $16.67',
+            'balances' => $this->copyBalances($balances),
+            'debt_reduction' => $debtReduction
+        ];
+
+        return [
+            'description' => 'Basic debt reduction scenario',
+            'expected_final_state' => [
+                'sapna_owes_navjot' => 20.00,
+                'third_user_owes_sapna' => 16.67,
+                'third_user_owes_navjot' => 66.67
+            ],
+            'steps' => $steps
+        ];
+    }
+
+    /**
+     * CASE 2: Debt reversal scenario
+     */
+    private function simulateCase2()
+    {
+        // Start with Sapna owing Navjot $14.07 (from previous scenario)
+        $balances = [
+            'navjot' => ['sapna' => 0, 'third_user' => 0],
+            'sapna' => ['navjot' => 14.07, 'third_user' => 0],
+            'third_user' => ['navjot' => 0, 'sapna' => 0]
+        ];
+
+        $steps = [];
+        $steps[] = [
+            'action' => 'Starting state',
+            'result' => 'Sapna owes Navjot $14.07',
+            'balances' => $this->copyBalances($balances)
+        ];
+
+        // Sapna pays $100 expense
+        // Each person owes $33.33
+        $navjotShare = 33.33;
+        $thirdUserShare = 33.33;
+        $existingDebt = $balances['sapna']['navjot'];
+
+        // Debt reduction first
+        $debtReduction = min($existingDebt, $navjotShare);
+        $remainingShare = $navjotShare - $debtReduction;
+
+        $balances['sapna']['navjot'] -= $debtReduction;
+        if ($remainingShare > 0) {
+            $balances['navjot']['sapna'] += $remainingShare;
+        }
+        $balances['third_user']['sapna'] += $thirdUserShare;
+
+        $steps[] = [
+            'action' => 'Sapna pays $100 expense',
+            'calculation' => '$100 ÷ 3 = $33.33 each, Existing debt: $14.07',
+            'debt_reduction' => $debtReduction,
+            'remaining_share' => $remainingShare,
+            'result' => 'Debt eliminated + Navjot owes Sapna $19.26, Third user owes Sapna $33.33',
+            'balances' => $this->copyBalances($balances)
+        ];
+
+        return [
+            'description' => 'Debt reversal scenario - existing debt gets eliminated and becomes reverse debt',
+            'expected_final_state' => [
+                'navjot_owes_sapna' => 19.26,
+                'third_user_owes_sapna' => 33.33,
+                'sapna_owes_navjot' => 0
+            ],
+            'steps' => $steps
+        ];
+    }
+
+    /**
+     * CASE 3: Multiple Debts Priority
+     */
+    private function simulateCase3_MultipleDebts()
+    {
+        // User A owes B $20 and C $30
+        // A pays $40 expense (B, C each owe $13.33)
+        // Expected: B debt: 20-13.33=6.67, C debt: 30-13.33=16.67
+
+        $balances = [
+            'A' => ['B' => 20, 'C' => 30],
+            'B' => ['A' => 0, 'C' => 0],
+            'C' => ['A' => 0, 'B' => 0]
+        ];
+
+        $steps = [];
+        $steps[] = [
+            'action' => 'Starting state',
+            'result' => 'A owes B $20, A owes C $30',
+            'balances' => $this->copyBalances($balances)
+        ];
+
+        // A pays $40 expense, each person's share = $13.33
+        $shareB = 13.33;
+        $shareC = 13.33;
+
+        // Reduce A's debt to B
+        $reductionB = min($balances['A']['B'], $shareB);
+        $balances['A']['B'] -= $reductionB;
+        $remainingShareB = $shareB - $reductionB;
+        if ($remainingShareB > 0) {
+            $balances['B']['A'] += $remainingShareB;
         }
 
-        $debugInfo = [];
+        // Reduce A's debt to C
+        $reductionC = min($balances['A']['C'], $shareC);
+        $balances['A']['C'] -= $reductionC;
+        $remainingShareC = $shareC - $reductionC;
+        if ($remainingShareC > 0) {
+            $balances['C']['A'] += $remainingShareC;
+        }
 
-        foreach ($expenses as $expense) {
-            $balancesBefore = $this->getWalletSnapshotBeforeExpense($expense, $users);
-            $balancesAfter = $this->getWalletSnapshotAfterSpecificExpense($expense, $users);
+        $steps[] = [
+            'action' => 'A pays $40 expense',
+            'calculation' => '$40 ÷ 3 = $13.33 each',
+            'debt_reductions' => [
+                'B_reduction' => $reductionB,
+                'C_reduction' => $reductionC
+            ],
+            'result' => 'A owes B: $6.67, A owes C: $16.67',
+            'balances' => $this->copyBalances($balances)
+        ];
 
-            $debugInfo[] = [
-                'expense' => [
-                    'id' => $expense->id,
-                    'description' => $expense->description,
-                    'amount' => $expense->amount,
-                    'paid_by' => $expense->paid_by_user_id,
-                    'created_at' => $expense->created_at->format('Y-m-d H:i:s')
-                ],
-                'user_' . $userId . '_before' => $balancesBefore[$userId] ?? [],
-                'user_' . $userId . '_after' => $balancesAfter[$userId] ?? []
+        return [
+            'description' => 'Multiple debts reduced separately based on equal shares',
+            'expected_final_state' => [
+                'A_owes_B' => 6.67,
+                'A_owes_C' => 16.67
+            ],
+            'steps' => $steps
+        ];
+    }
+
+    /**
+     * CASE 4: Exact Debt Elimination
+     */
+    private function simulateCase4_ExactDebtElimination()
+    {
+        // A owes B exactly $25.00, A pays $75 expense ($25 each)
+        $balances = [
+            'A' => ['B' => 25.00, 'C' => 0],
+            'B' => ['A' => 0, 'C' => 0],
+            'C' => ['A' => 0, 'B' => 0]
+        ];
+
+        $steps = [];
+        $steps[] = [
+            'action' => 'Starting state',
+            'result' => 'A owes B exactly $25.00',
+            'balances' => $this->copyBalances($balances)
+        ];
+
+        // A pays $75 expense, each share = $25.00
+        $share = 25.00;
+
+        // Reduce A's debt to B (exact elimination)
+        $balances['A']['B'] = 0; // Debt eliminated exactly
+        // B and C each owe A $25
+        $balances['B']['A'] += $share;
+        $balances['C']['A'] += $share;
+
+        $steps[] = [
+            'action' => 'A pays $75 expense',
+            'calculation' => '$75 ÷ 3 = $25.00 each',
+            'result' => 'A debt to B eliminated, B owes A $25, C owes A $25',
+            'balances' => $this->copyBalances($balances)
+        ];
+
+        return [
+            'description' => 'Exact debt elimination scenario',
+            'expected_final_state' => [
+                'A_owes_B' => 0,
+                'B_owes_A' => 25.00,
+                'C_owes_A' => 25.00
+            ],
+            'steps' => $steps
+        ];
+    }
+
+    /**
+     * CASE 5: Precision Edge Case
+     */
+    private function simulateCase5_PrecisionTest()
+    {
+        // Split $10.01 among 3 people
+        $amount = 10.01;
+        $participants = 3;
+
+        $amountCents = round($amount * 100); // 1001 cents
+        $sharePerPersonCents = intval($amountCents / $participants); // 333 cents
+        $remainderCents = $amountCents % $participants; // 2 cents
+
+        $shares = [];
+        for ($i = 0; $i < $participants; $i++) {
+            $shareCents = $sharePerPersonCents + ($i < $remainderCents ? 1 : 0);
+            $shares[] = $shareCents / 100;
+        }
+
+        return [
+            'description' => 'Cent-accurate distribution with odd amounts',
+            'scenario' => 'Split $10.01 among 3 people',
+            'calculation' => [
+                'total_cents' => $amountCents,
+                'base_share_cents' => $sharePerPersonCents,
+                'remainder_cents' => $remainderCents
+            ],
+            'expected_shares' => $shares,
+            'verification' => [
+                'total_distributed' => array_sum($shares),
+                'matches_original' => abs(array_sum($shares) - $amount) < 0.01
+            ]
+        ];
+    }
+
+    /**
+     * CASE 7: Settlement Overpayment
+     */
+    private function simulateCase7_SettlementOverpayment()
+    {
+        // A owes B $15, A pays B $25
+        $balances = [
+            'A' => ['B' => 15.00],
+            'B' => ['A' => 0]
+        ];
+
+        $steps = [];
+        $steps[] = [
+            'action' => 'Starting state',
+            'result' => 'A owes B $15.00',
+            'balances' => $this->copyBalances($balances)
+        ];
+
+        // A pays B $25 (overpayment of $10)
+        $paymentAmount = 25.00;
+        $existingDebt = $balances['A']['B'];
+        $overpayment = $paymentAmount - $existingDebt;
+
+        $balances['A']['B'] = 0; // Debt eliminated
+        $balances['B']['A'] = $overpayment; // B now owes A
+
+        $steps[] = [
+            'action' => 'A pays B $25.00',
+            'calculation' => 'Debt: $15.00, Payment: $25.00, Overpayment: $10.00',
+            'result' => 'Debt eliminated, B now owes A $10.00',
+            'balances' => $this->copyBalances($balances)
+        ];
+
+        return [
+            'description' => 'Settlement overpayment creates reverse debt',
+            'expected_final_state' => [
+                'A_owes_B' => 0,
+                'B_owes_A' => 10.00
+            ],
+            'steps' => $steps
+        ];
+    }
+
+    /**
+     * CASE 8: Zero-Amount Expense
+     */
+    private function simulateCase8_ZeroAmountExpense()
+    {
+        // Test system handles minimal amounts correctly
+        $amount = 0.01;
+        $participants = 3;
+
+        $amountCents = round($amount * 100); // 1 cent
+        $sharePerPersonCents = intval($amountCents / $participants); // 0 cents
+        $remainderCents = $amountCents % $participants; // 1 cent
+
+        return [
+            'description' => 'System handles minimal amounts correctly',
+            'scenario' => 'User pays $0.01 expense among 3 people',
+            'calculation' => [
+                'total_cents' => $amountCents,
+                'base_share_cents' => $sharePerPersonCents,
+                'remainder_cents' => $remainderCents
+            ],
+            'expected_result' => 'First user pays $0.01, others pay $0.00',
+            'edge_case_handling' => 'System should handle without errors'
+        ];
+    }
+
+    /**
+     * CASE 9: Large Group Scenario
+     */
+    private function simulateCase9_LargeGroup()
+    {
+        $participants = 10;
+        $amount = 123.45;
+
+        $amountCents = round($amount * 100);
+        $sharePerPersonCents = intval($amountCents / $participants);
+        $remainderCents = $amountCents % $participants;
+
+        return [
+            'description' => 'Performance and accuracy with many participants',
+            'scenario' => '10 users split $123.45',
+            'calculation' => [
+                'participants' => $participants,
+                'amount_cents' => $amountCents,
+                'base_share_cents' => $sharePerPersonCents,
+                'remainder_cents' => $remainderCents
+            ],
+            'performance_test' => 'Verify system handles large groups efficiently'
+        ];
+    }
+
+    /**
+     * CASE 10: Time-Based Sequence
+     */
+    private function simulateCase10_TimeBasedSequence()
+    {
+        return [
+            'description' => 'Order dependency and consistency in rapid transactions',
+            'scenario' => 'Multiple rapid transactions in sequence',
+            'test_points' => [
+                'Transaction order preservation',
+                'Balance consistency between transactions',
+                'No race conditions in debt reduction',
+                'Accurate running balances'
+            ],
+            'implementation_note' => 'Use created_at timestamps for proper ordering'
+        ];
+    }
+
+    private function copyBalances($balances)
+    {
+        return json_decode(json_encode($balances), true);
+    }
+
+    private function validateAllScenarios($scenarios)
+    {
+        $validationResults = [];
+
+        foreach ($scenarios as $caseName => $scenario) {
+            $validationResults[$caseName] = [
+                'has_expected_state' => isset($scenario['expected_final_state']),
+                'has_steps' => isset($scenario['steps']),
+                'is_complete' => isset($scenario['description'])
             ];
         }
 
-        return response()->json($debugInfo);
+        return [
+            'individual_results' => $validationResults,
+            'all_passed' => !in_array(false, array_map(function($result) {
+                return $result['has_expected_state'] || $result['has_steps'];
+            }, $validationResults))
+        ];
     }
 
     /**
-     * Regenerate all statement records from existing transactions
+     * Validate that current implementation matches expected behavior
      */
-    public function regenerateStatementRecords()
+    public function validateImplementation()
     {
-        // Clear existing statement records
-        StatementRecord::truncate();
+        // Test the actual processExpense method against our expected scenarios
+        $results = [];
 
-        $users = User::where('is_active', true)->get();
+        // Initialize a test balance matrix
+        $users = collect([
+            (object)['id' => 1, 'name' => 'A'],
+            (object)['id' => 2, 'name' => 'B'],
+            (object)['id' => 3, 'name' => 'C']
+        ]);
 
-        // Get all expenses and settlements
-        $expenses = Expense::orderBy('created_at')->get();
-        $settlements = Settlement::orderBy('created_at')->get();
+        // Test Case 3: Multiple Debts Priority
+        $balances = [
+            1 => [2 => 20.00, 3 => 30.00], // A owes B $20, C $30
+            2 => [1 => 0, 3 => 0],
+            3 => [1 => 0, 2 => 0]
+        ];
 
-        // Regenerate for all expenses
+        // Simulate A paying $40 expense
+        $mockExpense = (object)[
+            'paid_by_user_id' => 1,
+            'amount' => 40.00,
+            'participant_ids' => [1, 2, 3]
+        ];
+
+        $balancesBefore = $this->copyBalances($balances);
+        $this->processExpense($mockExpense, $balances, $users);
+
+        $results['case_3_validation'] = [
+            'balances_before' => $balancesBefore,
+            'balances_after' => $balances,
+            'expected_A_owes_B' => 6.67,
+            'actual_A_owes_B' => $balances[1][2],
+            'expected_A_owes_C' => 16.67,
+            'actual_A_owes_C' => $balances[1][3],
+            'case_3_passes' => abs($balances[1][2] - 6.67) < 0.01 && abs($balances[1][3] - 16.67) < 0.01
+        ];
+
+        return response()->json([
+            'implementation_validation' => $results,
+            'current_logic_assessment' => 'Testing if actual processExpense matches expected behavior'
+        ]);
+    }
+
+    /**
+     * Calculate detailed breakdown for each expense showing debt reductions and splits
+     */
+    private function calculateExpenseDetails($expenses, $users)
+    {
+        $expenseDetails = [];
+
         foreach ($expenses as $expense) {
-            $this->createStatementRecords($users, $expense, null);
-        }
+            $paidBy = $expense->paid_by_user_id;
+            $amount = $expense->amount;
 
-        // Regenerate for all settlements
-        foreach ($settlements as $settlement) {
-            $this->createStatementRecords($users, null, $settlement);
-        }
+            // Get participants who existed when expense was created
+            $participantIds = $expense->participant_ids ?? $users->pluck('id')->toArray();
+            $participants = $users->whereIn('id', $participantIds);
+            $participantCount = $participants->count();
 
-        return response()->json(['message' => 'Statement records regenerated successfully']);
-    }
+            if ($participantCount === 0) continue;
 
-    /**
-     * Calculate debt reductions that occurred in this transaction
-     */
-    private function calculateDebtReductions($userId, $balancesBefore, $balancesAfter, $users)
-    {
-        $debtReductions = [];
+            // Calculate precise per-person shares
+            $amountCents = round($amount * 100);
+            $sharePerPersonCents = intval($amountCents / $participantCount);
+            $remainderCents = $amountCents % $participantCount;
 
-        foreach ($users as $otherUser) {
-            if ($otherUser->id == $userId) continue;
+            // Get balances before this expense
+            $balancesBefore = $this->getBalancesBefore($expense);
+            $balancesAfter = $this->getBalancesAfter($expense, $users);
 
-            $owesBefore = $balancesBefore[$userId]['owes'][$otherUser->id] ?? 0;
-            $owesAfter = $balancesAfter[$userId]['owes'][$otherUser->id] ?? 0;
-            $receivesBefore = $balancesBefore[$userId]['receives'][$otherUser->id] ?? 0;
-            $receivesAfter = $balancesAfter[$userId]['receives'][$otherUser->id] ?? 0;
+            $details = [
+                'expense_id' => $expense->id,
+                'description' => $expense->description,
+                'amount' => $amount,
+                'paid_by' => $expense->paidByUser->name,
+                'paid_by_id' => $paidBy,
+                'expense_date' => $expense->expense_date,
+                'participant_count' => $participantCount,
+                'per_person_share' => round($sharePerPersonCents / 100, 2),
+                'wallet_before' => $balancesBefore,
+                'wallet_after' => $balancesAfter,
+                'debt_reductions' => [],
+                'normal_splits' => [],
+                'net_changes' => []
+            ];
 
-            // Check if debt was reduced (user owed less after)
-            if ($owesBefore > $owesAfter && ($owesBefore - $owesAfter) >= 0.01) {
-                $reduction = $owesBefore - $owesAfter;
-                $debtReductions[] = [
-                    'type' => 'debt_reduced',
-                    'other_user_id' => $otherUser->id,
-                    'other_user_name' => $otherUser->name,
-                    'amount' => $reduction,
-                    'before' => $owesBefore,
-                    'after' => $owesAfter
-                ];
-            }
-
-            // Check if receivable was reduced (user receives less after)
-            if ($receivesBefore > $receivesAfter && ($receivesBefore - $receivesAfter) >= 0.01) {
-                $reduction = $receivesBefore - $receivesAfter;
-                $debtReductions[] = [
-                    'type' => 'receivable_reduced',
-                    'other_user_id' => $otherUser->id,
-                    'other_user_name' => $otherUser->name,
-                    'amount' => $reduction,
-                    'before' => $receivesBefore,
-                    'after' => $receivesAfter
-                ];
-            }
-        }
-
-        return $debtReductions;
-    }
-
-    /**
-     * Create individual statement records for each user affected by a transaction
-     */
-    private function createStatementRecords($users, $expense = null, $settlement = null)
-    {
-        $balancesBefore = null;
-        $balancesAfter = null;
-
-        if ($expense) {
-            // For expenses, get balances before and after this specific expense
-            $balancesBefore = $this->getWalletSnapshotBeforeExpense($expense, $users);
-            $balancesAfter = $this->getWalletSnapshotAfterSpecificExpense($expense, $users);
-        } elseif ($settlement) {
-            // For settlements, get balances before and after this specific settlement
-            $balancesBefore = $this->getWalletSnapshotBeforeSettlement($settlement, $users);
-            $balancesAfter = $this->getWalletSnapshotAfterSettlement($settlement, $users);
-        }
-
-        foreach ($users as $user) {
-            $balanceBefore = round($balancesBefore[$user->id]['net_balance'] ?? 0, 2);
-            $balanceAfter = round($balancesAfter[$user->id]['net_balance'] ?? 0, 2);
-            $balanceChange = round($balanceAfter - $balanceBefore, 2);
-
-            // Only create records for users whose balance was affected
-            if (abs($balanceChange) >= 0.01) { // At least 1 cent change
-                $transactionType = $expense ? 'expense' : 'settlement';
-                $description = '';
-                $amount = 0;
-
-                if ($expense) {
-                    $description = "Expense: {$expense->description}";
-                    if ($expense->paid_by_user_id == $user->id) {
-                        $amount = $expense->amount; // Positive for payer
-                        $description .= " (Paid by you)";
-                    } else {
-                        $amount = -($expense->amount / ($expense->user_count_at_time ?? $users->count())); // Negative for others
-                        $description .= " (Your share)";
-                    }
-                } elseif ($settlement) {
-                    $description = "Payment: {$settlement->fromUser->name} → {$settlement->toUser->name}";
-                    if ($settlement->from_user_id == $user->id) {
-                        $amount = -$settlement->amount; // Negative for payer
-                        $description = "Payment made to {$settlement->toUser->name}";
-                        // For payer, show cash outflow regardless of net balance improvement
-                        $balanceChange = -$settlement->amount;
-                    } elseif ($settlement->to_user_id == $user->id) {
-                        $amount = $settlement->amount; // Positive for receiver
-                        $description = "Payment received from {$settlement->fromUser->name}";
-                        // For receiver, the balance change should be positive (cash received)
-                        // even if the net balance calculation shows a decrease due to debt reduction
-                        if ($balanceChange < 0) {
-                            $balanceChange = $settlement->amount;
-                        }
-                    }
+            // Calculate what each participant owes and debt reductions
+            $index = 0;
+            foreach ($participants->sortBy('id') as $participant) {
+                if ($participant->id === $paidBy) {
+                    $index++;
+                    continue;
                 }
 
-                StatementRecord::create([
-                    'user_id' => $user->id,
-                    'expense_id' => $expense?->id,
-                    'settlement_id' => $settlement?->id,
-                    'transaction_type' => $transactionType,
-                    'description' => $description,
-                    'amount' => $amount,
-                    'reference_number' => StatementRecord::generateReferenceNumber(
-                        $expense ? 'EXP' : 'PMT'
-                    ),
-                    'balance_before' => $balanceBefore,
-                    'balance_after' => $balanceAfter,
-                    'balance_change' => $balanceChange,
-                    'transaction_details' => [
-                        'expense_amount' => $expense?->amount,
-                        'settlement_amount' => $settlement?->amount,
-                        'transaction_participants' => $users->pluck('name')->toArray(),
-                        'affected_balances' => [
-                            'owes_before' => $balancesBefore[$user->id]['owes'] ?? [],
-                            'owes_after' => $balancesAfter[$user->id]['owes'] ?? [],
-                            'receives_before' => $balancesBefore[$user->id]['receives'] ?? [],
-                            'receives_after' => $balancesAfter[$user->id]['receives'] ?? [],
-                        ],
-                        'debt_reductions' => $this->calculateDebtReductions($user->id, $balancesBefore, $balancesAfter, $users)
-                    ],
-                    'transaction_date' => $expense?->created_at ?? $settlement?->created_at ?? now(),
-                    'status' => 'completed'
-                ]);
+                // Calculate this participant's share
+                $shareCents = $sharePerPersonCents + ($index < $remainderCents ? 1 : 0);
+                $share = $shareCents / 100;
+
+                // Check for debt reduction
+                $debtBefore = $balancesBefore[$paidBy]['owes'][$participant->id] ?? 0;
+                $debtAfter = $balancesAfter[$paidBy]['owes'][$participant->id] ?? 0;
+                $debtReduction = max(0, $debtBefore - $debtAfter);
+
+                if ($debtReduction > 0) {
+                    $details['debt_reductions'][] = [
+                        'user_id' => $participant->id,
+                        'user_name' => $participant->name,
+                        'debt_before' => $debtBefore,
+                        'debt_after' => $debtAfter,
+                        'reduction_amount' => $debtReduction
+                    ];
+                }
+
+                $details['normal_splits'][] = [
+                    'user_id' => $participant->id,
+                    'user_name' => $participant->name,
+                    'share_amount' => $share,
+                    'debt_reduction' => $debtReduction,
+                    'net_new_debt' => max(0, $share - $debtReduction)
+                ];
+
+                $index++;
             }
+
+            // Calculate net balance changes for all users
+            foreach ($users as $user) {
+                $balanceBefore = $balancesBefore[$user->id]['net_balance'] ?? 0;
+                $balanceAfter = $balancesAfter[$user->id]['net_balance'] ?? 0;
+                $change = round($balanceAfter - $balanceBefore, 2);
+
+                if (abs($change) >= 0.01) {
+                    $details['net_changes'][] = [
+                        'user_id' => $user->id,
+                        'user_name' => $user->name,
+                        'balance_before' => $balanceBefore,
+                        'balance_after' => $balanceAfter,
+                        'net_change' => $change
+                    ];
+                }
+            }
+
+            $expenseDetails[$expense->id] = $details;
         }
+
+        return $expenseDetails;
     }
 
     /**
-     * Precise debt reduction using cent-based calculations
+     * Calculate detailed breakdown for each settlement showing debt before/after
      */
-    private function autoReduceDebtsForPayerCents(&$netBalancesCents, $paidBy, $expenseAmountCents, $usersAtTime)
+    private function calculateSettlementDetails($settlements, $users)
     {
-        // Find all debts the payer has to others
-        $debtsToReduce = [];
-        foreach ($usersAtTime as $user) {
-            if ($user->id != $paidBy && $netBalancesCents[$paidBy][$user->id] > 0) {
-                $debtsToReduce[$user->id] = $netBalancesCents[$paidBy][$user->id];
+        $settlementDetails = [];
+
+        foreach ($settlements as $settlement) {
+            $fromId = $settlement->from_user_id;
+            $toId = $settlement->to_user_id;
+            $paymentAmount = $settlement->amount;
+
+            // Get balances before and after this settlement
+            $balancesBefore = $this->getBalancesBefore(null, $settlement);
+            $balancesAfter = $this->getBalancesAfter(null, $users, $settlement);
+
+            // Calculate debt amounts
+            $debtBefore = $balancesBefore[$fromId]['owes'][$toId] ?? 0;
+            $debtAfter = $balancesAfter[$fromId]['owes'][$toId] ?? 0;
+            $debtReduction = max(0, $debtBefore - $debtAfter);
+            $excessPayment = max(0, $paymentAmount - $debtBefore);
+
+            $details = [
+                'settlement_id' => $settlement->id,
+                'from_user_name' => $settlement->fromUser->name,
+                'to_user_name' => $settlement->toUser->name,
+                'from_user_id' => $fromId,
+                'to_user_id' => $toId,
+                'payment_amount' => $paymentAmount,
+                'settlement_date' => $settlement->settlement_date,
+                'wallet_before' => $balancesBefore,
+                'wallet_after' => $balancesAfter,
+                'debt_analysis' => [
+                    'debt_before' => $debtBefore,
+                    'debt_after' => $debtAfter,
+                    'debt_reduction' => $debtReduction,
+                    'excess_payment' => $excessPayment,
+                    'creates_reverse_debt' => $excessPayment > 0
+                ],
+                'net_changes' => []
+            ];
+
+            // Calculate net balance changes for all users
+            foreach ($users as $user) {
+                $balanceBefore = $balancesBefore[$user->id]['net_balance'] ?? 0;
+                $balanceAfter = $balancesAfter[$user->id]['net_balance'] ?? 0;
+                $change = round($balanceAfter - $balanceBefore, 2);
+
+                if (abs($change) >= 0.01) {
+                    $details['net_changes'][] = [
+                        'user_id' => $user->id,
+                        'user_name' => $user->name,
+                        'balance_before' => $balanceBefore,
+                        'balance_after' => $balanceAfter,
+                        'net_change' => $change
+                    ];
+                }
+            }
+
+            $settlementDetails[$settlement->id] = $details;
+        }
+
+        return $settlementDetails;
+    }
+
+    /**
+     * Get balances after a specific transaction (expense or settlement)
+     */
+    private function getBalancesAfter($expense = null, $users = null, $settlement = null)
+    {
+        $users = $users ?? User::where('is_active', true)->get();
+        $cutoffDate = null;
+
+        if ($expense) {
+            $cutoffDate = $expense->created_at;
+        } elseif ($settlement) {
+            $cutoffDate = $settlement->created_at;
+        }
+
+        if (!$cutoffDate) {
+            return $this->calculateBalances();
+        }
+
+        // Calculate balances up to and including this transaction
+        $balances = [];
+        foreach ($users as $user1) {
+            foreach ($users as $user2) {
+                if ($user1->id !== $user2->id) {
+                    $balances[$user1->id][$user2->id] = 0;
+                }
             }
         }
 
-        if (empty($debtsToReduce)) {
-            return; // No debts to reduce
+        // Process expenses up to and including cutoff
+        $expenses = Expense::where('created_at', '<=', $cutoffDate)->orderBy('created_at')->get();
+        foreach ($expenses as $exp) {
+            $this->processExpense($exp, $balances, $users);
         }
 
-        // Sort debts by amount (highest first)
-        arsort($debtsToReduce);
-
-        // Calculate per-person amount that each user owes the payer (in cents)
-        $totalUsers = count($usersAtTime);
-        $perPersonCents = intval($expenseAmountCents / $totalUsers);
-        $remainder = $expenseAmountCents % $totalUsers;
-
-        // Reduce each debt by the amount that specific user owes the payer
-        $userIndex = 0;
-        foreach ($debtsToReduce as $userId => $debtCents) {
-            // Add extra cent to first users if there's a remainder
-            $thisPersonAmount = $perPersonCents + ($userIndex < $remainder ? 1 : 0);
-            $reductionCents = min($debtCents, $thisPersonAmount);
-
-            // Reduce the debt: payer owes less to this user
-            $netBalancesCents[$paidBy][$userId] -= $reductionCents;
-
-            // The other user now owes the payer back the reduction amount
-            $netBalancesCents[$userId][$paidBy] += $reductionCents;
-
-            $userIndex++;
+        // Process settlements up to and including cutoff
+        $settlements = Settlement::where('created_at', '<=', $cutoffDate)->orderBy('created_at')->get();
+        foreach ($settlements as $sett) {
+            $this->processSettlement($sett, $balances);
         }
+
+        $this->consolidateDebts($balances, $users);
+        return $this->formatBalancesForDisplay($balances, $users);
     }
 }

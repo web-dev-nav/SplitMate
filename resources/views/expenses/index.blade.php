@@ -225,8 +225,8 @@
                     ]);
                 }
                 
-                // Sort by creation time ascending (chronological order, oldest first for logical debt flow)
-                $allTransactions = $allTransactions->sortBy('created_at');
+                // Sort by creation time descending (newest first)
+                $allTransactions = $allTransactions->sortByDesc('created_at');
             @endphp
 
             @forelse($allTransactions as $transaction)
@@ -279,7 +279,7 @@
                                     <!-- Summary -->
                                     <div class="mb-4 text-center">
                                         <p class="text-lg font-semibold text-gray-800">
-                                            ${{ number_format($details['amount'], 2) }} ÷ {{ count($details['normal_splits']) + 1 }} people = ${{ number_format($details['per_person'], 2) }} each
+                                            ${{ number_format($details['amount'], 2) }} ÷ {{ $details['participant_count'] }} people = ${{ number_format($details['per_person_share'], 2) }} each
                                         </p>
                                         <p class="text-gray-600">Paid by {{ $details['paid_by'] }}</p>
                                     </div>
@@ -289,9 +289,21 @@
                                         <h6 class="font-bold text-gray-800 mb-2">💸 Amount Owed</h6>
                                         <div class="ml-4 space-y-1">
                                             @foreach($details['normal_splits'] as $split)
-                                                <div class="flex justify-between">
+                                                <div class="flex justify-between items-center">
                                                     <span>{{ $split['user_name'] }} owes {{ $details['paid_by'] }}</span>
-                                                    <span class="font-bold">${{ number_format($split['owes_amount'], 2) }}</span>
+                                                    <div class="text-right">
+                                                        <span class="font-bold">${{ number_format($split['share_amount'], 2) }}</span>
+                                                        @if($split['debt_reduction'] > 0)
+                                                            <div class="text-xs text-green-600">
+                                                                (Reduced by ${{ number_format($split['debt_reduction'], 2) }})
+                                                            </div>
+                                                            @if($split['net_new_debt'] > 0)
+                                                                <div class="text-xs text-red-600">
+                                                                    New debt: ${{ number_format($split['net_new_debt'], 2) }}
+                                                                </div>
+                                                            @endif
+                                                        @endif
+                                                    </div>
                                                 </div>
                                             @endforeach
                                         </div>
@@ -325,16 +337,15 @@
                                         </div>
                                     @endif
 
-                                    <!-- Wallet Balances -->
-                                    @if(isset($details['wallet_snapshot_after']) && count($details['wallet_snapshot_after']) > 0)
+                                    <!-- Net Balance Changes -->
+                                    @if(isset($details['net_changes']) && count($details['net_changes']) > 0)
                                         <div class="mb-4">
-                                            <h6 class="font-bold text-gray-800 mb-3">🏦 Updated Balances</h6>
+                                            <h6 class="font-bold text-gray-800 mb-3">🏦 Balance Changes</h6>
                                             <div class="ml-4">
                                                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                                                    @foreach($details['wallet_snapshot_after'] as $userId => $walletAfter)
+                                                    @foreach($details['net_changes'] as $change)
                                                         @php
-                                                            $walletBefore = $details['wallet_snapshot_before'][$userId] ?? ['net_balance' => 0];
-                                                            $balanceChange = $walletAfter['net_balance'] - $walletBefore['net_balance'];
+                                                            $balanceChange = $change['net_change'];
                                                         @endphp
                                                         <div class="bg-white border-2 border-gray-200 rounded-xl shadow-sm font-mono text-sm">
                                                             <!-- Bank Statement Header -->
@@ -342,7 +353,7 @@
                                                                 <div class="flex items-center justify-between">
                                                                     <div class="flex items-center gap-2">
                                                                         <span class="text-xl">💳</span>
-                                                                        <span class="font-bold">{{ $walletAfter['user_name'] }}</span>
+                                                                        <span class="font-bold">{{ $change['user_name'] }}</span>
                                                                     </div>
                                                                     <span class="text-xs opacity-75">Account Statement</span>
                                                                 </div>
@@ -353,8 +364,8 @@
                                                                 <!-- Previous Balance -->
                                                                 <div class="flex justify-between items-center py-2 border-b border-gray-100">
                                                                     <span class="text-gray-600">Previous Balance:</span>
-                                                                    <span class="font-bold {{ $walletBefore['net_balance'] >= 0 ? 'text-green-600' : 'text-red-600' }}">
-                                                                        {{ $walletBefore['net_balance'] >= 0 ? '+' : '' }}${{ number_format($walletBefore['net_balance'], 2) }}
+                                                                    <span class="font-bold {{ $change['balance_before'] >= 0 ? 'text-green-600' : 'text-red-600' }}">
+                                                                        {{ $change['balance_before'] >= 0 ? '+' : '' }}${{ number_format($change['balance_before'], 2) }}
                                                                     </span>
                                                                 </div>
 
@@ -369,19 +380,22 @@
                                                                 <!-- Running Balance (Current) -->
                                                                 <div class="flex justify-between items-center py-2 bg-gray-50 px-3 rounded-lg">
                                                                     <span class="font-bold text-gray-800">Running Balance:</span>
-                                                                    <span class="text-lg font-bold {{ $walletAfter['net_balance'] >= 0 ? 'text-green-600' : 'text-red-600' }}">
-                                                                        {{ $walletAfter['net_balance'] >= 0 ? '+' : '' }}${{ number_format($walletAfter['net_balance'], 2) }}
+                                                                    <span class="text-lg font-bold {{ $change['balance_after'] >= 0 ? 'text-green-600' : 'text-red-600' }}">
+                                                                        {{ $change['balance_after'] >= 0 ? '+' : '' }}${{ number_format($change['balance_after'], 2) }}
                                                                     </span>
                                                                 </div>
 
                                                                 <!-- Account Details -->
-                                                                @if(count($walletAfter['owes']) > 0 || count($walletAfter['receives']) > 0)
+                                                                @php
+                                                                    $userWalletAfter = $details['wallet_after'][$change['user_id']] ?? null;
+                                                                @endphp
+                                                                @if($userWalletAfter && (count($userWalletAfter['owes']) > 0 || count($userWalletAfter['owed_by']) > 0))
                                                                     <div class="mt-4 pt-3 border-t border-gray-200">
                                                                         <div class="text-xs text-gray-500 mb-2">Account Breakdown:</div>
 
-                                                                        @if(count($walletAfter['owes']) > 0)
+                                                                        @if(count($userWalletAfter['owes']) > 0)
                                                                             <div class="space-y-1 mb-2">
-                                                                                @foreach($walletAfter['owes'] as $otherUserId => $amount)
+                                                                                @foreach($userWalletAfter['owes'] as $otherUserId => $amount)
                                                                                     <div class="flex justify-between text-xs">
                                                                                         <span class="text-red-600">Owes {{ $users->find($otherUserId)->name ?? 'Unknown' }}:</span>
                                                                                         <span class="text-red-600">-${{ number_format($amount, 2) }}</span>
@@ -390,9 +404,9 @@
                                                                             </div>
                                                                         @endif
 
-                                                                        @if(count($walletAfter['receives']) > 0)
+                                                                        @if(count($userWalletAfter['owed_by']) > 0)
                                                                             <div class="space-y-1">
-                                                                                @foreach($walletAfter['receives'] as $otherUserId => $amount)
+                                                                                @foreach($userWalletAfter['owed_by'] as $otherUserId => $amount)
                                                                                     <div class="flex justify-between text-xs">
                                                                                         <span class="text-green-600">{{ $users->find($otherUserId)->name ?? 'Unknown' }} owes:</span>
                                                                                         <span class="text-green-600">+${{ number_format($amount, 2) }}</span>
@@ -404,7 +418,7 @@
                                                                 @endif
 
                                                                 <!-- All Settled Message -->
-                                                                @if(count($walletAfter['owes']) == 0 && count($walletAfter['receives']) == 0)
+                                                                @if($userWalletAfter && count($userWalletAfter['owes']) == 0 && count($userWalletAfter['owed_by']) == 0)
                                                                     <div class="text-center py-3 mt-4 pt-3 border-t border-gray-200">
                                                                         <span class="text-2xl">✅</span>
                                                                         <p class="text-xs text-gray-500 mt-1">All settled up!</p>
@@ -461,11 +475,12 @@
                                     @php
                                         // Get pre-calculated settlement details
                                         $details = $settlementDetails[$settlement->id] ?? null;
-                                        $currentDebt = $details['current_debt'] ?? 0;
+                                        $debtAnalysis = $details['debt_analysis'] ?? null;
+                                        $currentDebt = $debtAnalysis['debt_before'] ?? 0;
                                         $paymentAmount = $details['payment_amount'] ?? $settlement->amount;
-                                        $reduction = $details['reduction'] ?? 0;
-                                        $remainingDebt = $details['remaining_debt'] ?? 0;
-                                        $excessPayment = $details['excess_payment'] ?? 0;
+                                        $reduction = $debtAnalysis['debt_reduction'] ?? 0;
+                                        $remainingDebt = $debtAnalysis['debt_after'] ?? 0;
+                                        $excessPayment = $debtAnalysis['excess_payment'] ?? 0;
                                     @endphp
 
                                     <!-- Payment Summary -->

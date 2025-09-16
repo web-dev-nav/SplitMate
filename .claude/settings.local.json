@@ -5,7 +5,8 @@
       "Bash(php artisan make:model:*)",
       "Bash(php artisan:*)",
       "Bash(tree:*)",
-      "Bash(php:*)"
+      "Bash(php:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []
