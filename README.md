@@ -2,6 +2,8 @@
 
 A sophisticated expense splitting application built with Laravel 12 and Tailwind CSS. SplitMate helps groups of people track shared expenses with **automatic debt reduction**, calculate complex balances, and manage settlements efficiently.
 
+<img width="1920" height="1715" alt="captureit_9-16-2025_at_21-09-24" src="https://github.com/user-attachments/assets/5c027fcf-b265-447a-b51a-1890fce83a9c" />
+
 ## ✨ Key Features
 
 ### 🧮 **Smart Expense Management**
