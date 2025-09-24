@@ -81,7 +81,7 @@
                     <label class="block text-sm font-medium text-gray-700 mb-1">Receipt Photo <span class="text-red-500">*</span></label>
                     
                     <!-- Primary file input (hidden by default, shown when validation fails) -->
-                    <input type="file" name="receipt_photo" id="receiptFile" accept="image/*" 
+                    <input type="file" name="receipt_photo" id="receiptFile" accept=".jpg,.jpeg,.png,.gif,.bmp,.webp,.svg,image/*" 
                            class="hidden w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-blue-500">
                     
                     <!-- Hidden file input for camera -->
@@ -158,7 +158,7 @@
                     <label class="block text-sm font-medium text-gray-700 mb-1">Payment Screenshot <span class="text-red-500">*</span></label>
                     
                     <!-- Primary file input (hidden by default, shown when validation fails) -->
-                    <input type="file" name="payment_screenshot" id="paymentScreenshotFile" accept="image/*" 
+                    <input type="file" name="payment_screenshot" id="paymentScreenshotFile" accept=".jpg,.jpeg,.png,.gif,.bmp,.webp,.svg,image/*" 
                            class="hidden w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100 border-2 border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:border-green-500">
                     
                     <!-- Hidden file input for camera -->
@@ -683,6 +683,38 @@
             });
         }
 
+        // Function to validate file type and size
+        function validateFile(file) {
+            const isValidImage = file.type.startsWith('image/');
+            const isValidSize = file.size <= 15 * 1024 * 1024; // 15MB
+
+            // More specific file type validation
+            const validTypes = [
+                'image/jpeg', 'image/jpg', 'image/png', 'image/gif',
+                'image/bmp', 'image/webp', 'image/svg+xml'
+            ];
+            const isValidType = validTypes.includes(file.type.toLowerCase());
+
+            // Also check file extension as backup
+            const fileName = file.name.toLowerCase();
+            const validExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'];
+            const hasValidExtension = validExtensions.some(ext => fileName.endsWith(ext));
+
+            return {
+                isValid: (isValidImage || isValidType || hasValidExtension) && isValidSize,
+                isValidType: isValidImage || isValidType || hasValidExtension,
+                isValidSize: isValidSize,
+                errorMessage: function() {
+                    if (!this.isValidType) {
+                        return 'Please select a valid image file (JPG, PNG, GIF, BMP, WEBP, SVG).';
+                    } else if (!this.isValidSize) {
+                        return 'File is too large. Please select a file smaller than 15MB.';
+                    }
+                    return '';
+                }
+            };
+        }
+
         // Function to show file upload status
         function showFileStatus(fileInput, statusId) {
             let statusDiv = document.getElementById(statusId);
@@ -695,17 +727,13 @@
             
             if (fileInput.files.length > 0) {
                 const file = fileInput.files[0];
-                const isValidImage = file.type.startsWith('image/');
-                const isValidSize = file.size <= 2 * 1024 * 1024; // 2MB
-                
-                if (isValidImage && isValidSize) {
+                const validation = validateFile(file);
+
+                if (validation.isValid) {
                     statusDiv.innerHTML = `<span class="text-green-600">✓ ${file.name}</span>`;
                     statusDiv.className = 'text-sm mt-1 text-green-600';
-                } else if (!isValidImage) {
-                    statusDiv.innerHTML = `<span class="text-red-600">✗ Please select an image file</span>`;
-                    statusDiv.className = 'text-sm mt-1 text-red-600';
-                } else if (!isValidSize) {
-                    statusDiv.innerHTML = `<span class="text-red-600">✗ File too large (max 2MB)</span>`;
+                } else {
+                    statusDiv.innerHTML = `<span class="text-red-600">✗ ${validation.errorMessage()}</span>`;
                     statusDiv.className = 'text-sm mt-1 text-red-600';
                 }
             } else {
@@ -791,26 +819,20 @@
                 // Check file validity
                 const file = receiptFile.files[0];
                 if (file) {
-                    const isValidImage = file.type.startsWith('image/');
-                    const isValidSize = file.size <= 2 * 1024 * 1024; // 2MB
-                    
-                    if (!isValidImage || !isValidSize) {
+                    const validation = validateFile(file);
+
+                    if (!validation.isValid) {
                         e.preventDefault();
-                        let errorMessage = '';
-                        if (!isValidImage) {
-                            errorMessage = 'Please select a valid image file (JPG, PNG, GIF, etc.).';
-                        } else if (!isValidSize) {
-                            errorMessage = 'File is too large. Please select a file smaller than 2MB.';
-                        }
+                        const errorMessage = validation.errorMessage();
                         showTopAlert(errorMessage);
-                        
+
                         // Update file status to show error
                         const statusDiv = document.getElementById('receipt-status');
                         if (statusDiv) {
                             statusDiv.innerHTML = `<span class="text-red-600">✗ ${errorMessage}</span>`;
                             statusDiv.className = 'text-sm mt-1 text-red-600';
                         }
-                        
+
                         // Show main input and focus on it
                         if (receiptFile) {
                             receiptFile.classList.remove('hidden');
@@ -859,26 +881,20 @@
                 // Check file validity
                 const file = paymentFile.files[0];
                 if (file) {
-                    const isValidImage = file.type.startsWith('image/');
-                    const isValidSize = file.size <= 2 * 1024 * 1024; // 2MB
-                    
-                    if (!isValidImage || !isValidSize) {
+                    const validation = validateFile(file);
+
+                    if (!validation.isValid) {
                         e.preventDefault();
-                        let errorMessage = '';
-                        if (!isValidImage) {
-                            errorMessage = 'Please select a valid image file (JPG, PNG, GIF, etc.).';
-                        } else if (!isValidSize) {
-                            errorMessage = 'File is too large. Please select a file smaller than 2MB.';
-                        }
+                        const errorMessage = validation.errorMessage();
                         showTopAlert(errorMessage);
-                        
+
                         // Update file status to show error
                         const statusDiv = document.getElementById('payment-status');
                         if (statusDiv) {
                             statusDiv.innerHTML = `<span class="text-red-600">✗ ${errorMessage}</span>`;
                             statusDiv.className = 'text-sm mt-1 text-red-600';
                         }
-                        
+
                         // Show main input and focus on it
                         if (paymentFile) {
                             paymentFile.classList.remove('hidden');

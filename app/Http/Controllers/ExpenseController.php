@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Models\BalanceState;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class ExpenseController extends Controller
 {
@@ -39,27 +40,83 @@ class ExpenseController extends Controller
      */
     public function store(Request $request)
     {
-        $validated = $request->validate([
-            'description' => 'required|string|max:255',
-            'amount' => 'required|numeric|min:0.01|max:999999.99',
-            'paid_by_user_id' => 'required|exists:users,id',
-            'expense_date' => 'required|date|before_or_equal:today',
-            'receipt_photo' => 'required|image|max:2048',
-        ]);
+        try {
+            // Log incoming request for debugging
+            Log::info('Expense store request received', [
+                'has_file' => $request->hasFile('receipt_photo'),
+                'files_count' => count($request->allFiles()),
+                'content_length' => $request->server('CONTENT_LENGTH'),
+                'max_upload_size' => ini_get('upload_max_filesize'),
+                'max_post_size' => ini_get('post_max_size')
+            ]);
 
-        DB::transaction(function () use ($validated) {
-            $validated['receipt_photo'] = request()->file('receipt_photo')->store('receipts', 'public');
+            $validated = $request->validate([
+                'description' => 'required|string|max:255',
+                'amount' => 'required|numeric|min:0.01|max:999999.99',
+                'paid_by_user_id' => 'required|exists:users,id',
+                'expense_date' => 'required|date|before_or_equal:today',
+                'receipt_photo' => 'required|file|mimes:jpeg,jpg,png,gif,bmp,webp,svg|max:15360',
+            ]);
 
-            // Store participant info at time of expense
-            $users = User::where('is_active', true)->get();
-            $validated['user_count_at_time'] = $users->count();
-            $validated['participant_ids'] = $users->pluck('id')->toArray();
+            DB::transaction(function () use ($validated, $request) {
+                // Upload receipt photo with error handling
+                $receiptFile = $request->file('receipt_photo');
+                if (!$receiptFile) {
+                    throw new \InvalidArgumentException('Receipt photo is required');
+                }
 
-            $expense = Expense::create($validated);
-            $this->createStatementRecords($expense);
-        });
+                Log::info('Processing receipt photo upload', [
+                    'original_name' => $receiptFile->getClientOriginalName(),
+                    'size' => $receiptFile->getSize(),
+                    'mime_type' => $receiptFile->getMimeType(),
+                    'is_valid' => $receiptFile->isValid(),
+                    'error_code' => $receiptFile->getError()
+                ]);
 
-        return redirect()->back()->with('success', 'Expense added successfully!');
+                try {
+                    $receiptPath = $receiptFile->store('receipts', 'public');
+                    if (!$receiptPath) {
+                        throw new \RuntimeException('Failed to store receipt photo');
+                    }
+                    $validated['receipt_photo'] = $receiptPath;
+
+                    Log::info('Receipt photo uploaded successfully', [
+                        'path' => $receiptPath
+                    ]);
+                } catch (\Exception $e) {
+                    Log::error('Receipt photo upload failed', [
+                        'error' => $e->getMessage(),
+                        'file_size' => $receiptFile->getSize(),
+                        'file_type' => $receiptFile->getMimeType(),
+                        'file_error' => $receiptFile->getError(),
+                        'disk_config' => config('filesystems.disks.public')
+                    ]);
+                    throw new \RuntimeException('Failed to upload receipt photo: ' . $e->getMessage());
+                }
+
+                // Store participant info at time of expense
+                $users = User::where('is_active', true)->get();
+                $validated['user_count_at_time'] = $users->count();
+                $validated['participant_ids'] = $users->pluck('id')->toArray();
+
+                $expense = Expense::create($validated);
+                $this->createStatementRecords($expense);
+            });
+
+            return redirect()->back()->with('success', 'Expense added successfully!');
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            Log::error('Expense validation failed', [
+                'errors' => $e->errors(),
+                'request_data' => $request->except(['receipt_photo'])
+            ]);
+            return redirect()->back()->withErrors($e->errors())->withInput();
+        } catch (\Exception $e) {
+            Log::error('Expense creation failed', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            return redirect()->back()->with('error', 'Failed to create expense: ' . $e->getMessage())->withInput();
+        }
     }
 
     /**
@@ -72,7 +129,7 @@ class ExpenseController extends Controller
             'to_user_id' => 'required|exists:users,id|different:from_user_id',
             'amount' => 'required|numeric|min:0.01',
             'settlement_date' => 'required|date',
-            'payment_screenshot' => 'required|image|max:2048',
+            'payment_screenshot' => 'required|file|mimes:jpeg,jpg,png,gif,bmp,webp,svg|max:15360',
         ]);
 
         DB::transaction(function () use ($validated) {
@@ -84,7 +141,27 @@ class ExpenseController extends Controller
                 throw new \InvalidArgumentException("Payment amount exceeds current debt of $" . number_format($currentDebt, 2));
             }
 
-            $validated['payment_screenshot'] = request()->file('payment_screenshot')->store('payment-screenshots', 'public');
+            // Upload payment screenshot with error handling
+            $screenshotFile = request()->file('payment_screenshot');
+            if (!$screenshotFile) {
+                throw new \InvalidArgumentException('Payment screenshot is required');
+            }
+
+            try {
+                $screenshotPath = $screenshotFile->store('payment-screenshots', 'public');
+                if (!$screenshotPath) {
+                    throw new \RuntimeException('Failed to store payment screenshot');
+                }
+                $validated['payment_screenshot'] = $screenshotPath;
+            } catch (\Exception $e) {
+                Log::error('Payment screenshot upload failed', [
+                    'error' => $e->getMessage(),
+                    'file_size' => $screenshotFile->getSize(),
+                    'file_type' => $screenshotFile->getMimeType(),
+                    'disk_config' => config('filesystems.disks.public')
+                ]);
+                throw new \RuntimeException('Failed to upload payment screenshot: ' . $e->getMessage());
+            }
 
             $settlement = Settlement::create($validated);
             $this->createStatementRecords(null, $settlement);
