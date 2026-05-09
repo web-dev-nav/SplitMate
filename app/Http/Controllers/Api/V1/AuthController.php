@@ -163,10 +163,11 @@ class AuthController extends Controller
             'name' => 'sometimes|nullable|string|max:255',
         ]);
 
-        $appleUser = $this->verifyAppleIdentityToken($validated['id_token']);
+        $verificationError = null;
+        $appleUser = $this->verifyAppleIdentityToken($validated['id_token'], $verificationError);
         if (!$appleUser || empty($appleUser['sub'])) {
             throw ValidationException::withMessages([
-                'id_token' => ['Invalid Apple token.'],
+                'id_token' => [$verificationError ?: 'Invalid Apple token.'],
             ]);
         }
 
@@ -571,57 +572,73 @@ class AuthController extends Controller
     /**
      * @return array<string, mixed>|null
      */
-    private function verifyAppleIdentityToken(string $idToken): ?array
+    private function verifyAppleIdentityToken(string $idToken, ?string &$error = null): ?array
     {
         $parts = explode('.', $idToken);
         if (count($parts) !== 3) {
+            $error = 'Invalid Apple token format.';
             return null;
         }
 
         $header = $this->decodeJwtPart($parts[0]);
         $payload = $this->decodeJwtPart($parts[1]);
         if (!is_array($header) || !is_array($payload)) {
+            $error = 'Invalid Apple token payload.';
             return null;
         }
 
         if (($header['alg'] ?? null) !== 'RS256') {
+            $error = 'Unsupported Apple token algorithm.';
             return null;
         }
 
         $kid = (string) ($header['kid'] ?? '');
         if ($kid === '') {
+            $error = 'Apple token key identifier missing.';
             return null;
         }
 
         $publicKey = $this->applePublicKeyForKid($kid);
         if (!$publicKey) {
+            $error = 'Unable to load Apple public key.';
             return null;
         }
 
         $signedPart = $parts[0].'.'.$parts[1];
         $signature = $this->decodeBase64Url($parts[2]);
         if ($signature === null) {
+            $error = 'Invalid Apple token signature format.';
             return null;
         }
 
         $verified = openssl_verify($signedPart, $signature, $publicKey, OPENSSL_ALGO_SHA256);
         if ($verified !== 1) {
+            $error = 'Apple token signature verification failed.';
             return null;
         }
 
         if ((string) ($payload['iss'] ?? '') !== self::APPLE_ISSUER) {
+            $error = 'Apple token issuer mismatch.';
             return null;
         }
 
-        $configuredAudience = trim((string) env('APPLE_CLIENT_ID', ''));
-        if ($configuredAudience !== '') {
-            if ((string) ($payload['aud'] ?? '') !== $configuredAudience) {
+        $configuredAudienceRaw = trim((string) env('APPLE_CLIENT_ID', ''));
+        if ($configuredAudienceRaw !== '') {
+            $allowedAudiences = array_values(array_filter(array_map(
+                static fn (string $value): string => trim($value),
+                explode(',', $configuredAudienceRaw)
+            )));
+
+            if (!in_array((string) ($payload['aud'] ?? ''), $allowedAudiences, true)) {
+                $aud = (string) ($payload['aud'] ?? '');
+                $error = "Apple token audience mismatch. Token aud='{$aud}'.";
                 return null;
             }
         }
 
         $exp = (int) ($payload['exp'] ?? 0);
         if ($exp > 0 && $exp < time()) {
+            $error = 'Apple token has expired.';
             return null;
         }
 
