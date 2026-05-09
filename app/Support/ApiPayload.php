@@ -25,6 +25,7 @@ class ApiPayload
             'name' => $user->name,
             'email' => $user->email,
             'is_google_account' => !empty($user->google_id),
+            'is_apple_account' => !empty($user->apple_id),
             'is_active' => (bool) $user->is_active,
             'email_verified_at' => optional($user->email_verified_at)?->toIso8601String(),
             'created_at' => optional($user->created_at)?->toIso8601String(),

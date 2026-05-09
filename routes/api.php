@@ -15,6 +15,7 @@ Route::prefix('v1')->group(function () {
     Route::post('/auth/register', [AuthController::class, 'register']);
     Route::post('/auth/login', [AuthController::class, 'login']);
     Route::post('/auth/google', [AuthController::class, 'googleLogin']);
+    Route::post('/auth/apple', [AuthController::class, 'appleLogin']);
     Route::post('/auth/password/send-code', [AuthController::class, 'sendPasswordResetCode']);
     Route::post('/auth/password/reset', [AuthController::class, 'resetPassword']);
     Route::get('/invitations/accept/{token}', [GroupController::class, 'acceptInvitation']);
@@ -24,6 +25,7 @@ Route::prefix('v1')->group(function () {
         Route::post('/auth/logout', [AuthController::class, 'logout']);
         Route::get('/auth/me', [AuthController::class, 'me']);
         Route::patch('/auth/me', [AuthController::class, 'updateProfile']);
+        Route::delete('/auth/me', [AuthController::class, 'deleteAccount']);
         Route::post('/auth/email/send-code', [AuthController::class, 'sendVerificationCode']);
         Route::post('/auth/email/verify', [AuthController::class, 'verifyEmailCode']);
 

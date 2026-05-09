@@ -8,6 +8,7 @@ use App\Models\PasswordResetCode;
 use App\Models\User;
 use App\Support\ApiPayload;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
@@ -18,6 +19,7 @@ use Illuminate\Validation\ValidationException;
 class AuthController extends Controller
 {
     private const RESET_CODE_EXPIRY_MINUTES = 15;
+    private const APPLE_ISSUER = 'https://appleid.apple.com';
 
     /**
      * Register a new user.
@@ -152,6 +154,84 @@ class AuthController extends Controller
     }
 
     /**
+     * Login/register using Apple identity token.
+     */
+    public function appleLogin(Request $request)
+    {
+        $validated = $request->validate([
+            'id_token' => 'required|string',
+            'name' => 'sometimes|nullable|string|max:255',
+        ]);
+
+        $appleUser = $this->verifyAppleIdentityToken($validated['id_token']);
+        if (!$appleUser || empty($appleUser['sub']) || empty($appleUser['email'])) {
+            throw ValidationException::withMessages([
+                'id_token' => ['Invalid Apple token.'],
+            ]);
+        }
+
+        $email = strtolower(trim((string) $appleUser['email']));
+        $appleId = (string) $appleUser['sub'];
+        $name = trim((string) ($validated['name'] ?? ''));
+        if ($name === '') {
+            $name = trim((string) ($appleUser['name'] ?? 'Apple User'));
+        }
+        if ($name === '') {
+            $name = 'Apple User';
+        }
+
+        $user = User::where('apple_id', $appleId)->first();
+        if (!$user) {
+            $user = User::whereRaw('LOWER(email) = ?', [$email])->first();
+        }
+
+        if ($user && !empty($user->apple_id) && $user->apple_id !== $appleId) {
+            throw ValidationException::withMessages([
+                'email' => ['This email is already linked to a different Apple account.'],
+            ]);
+        }
+
+        if ($user) {
+            $existingEmailOwner = User::whereRaw('LOWER(email) = ?', [$email])->first();
+            if ($existingEmailOwner && $existingEmailOwner->id !== $user->id) {
+                throw ValidationException::withMessages([
+                    'email' => ['Another account already uses this email address.'],
+                ]);
+            }
+        }
+
+        if (!$user) {
+            $user = User::create([
+                'uuid' => Str::uuid(),
+                'name' => $name,
+                'email' => $email,
+                'apple_id' => $appleId,
+                'password' => Hash::make(Str::random(40)),
+                'is_active' => true,
+                'email_verified_at' => now(),
+            ]);
+        } else {
+            $updates = [
+                'apple_id' => $appleId,
+                'email' => $email,
+                'is_active' => true,
+                'email_verified_at' => now(),
+            ];
+            if (trim((string) $user->name) === '' || ($validated['name'] ?? null) !== null) {
+                $updates['name'] = $name;
+            }
+            $user->forceFill($updates)->save();
+        }
+
+        $token = $user->createToken('api_token')->plainTextToken;
+
+        return response()->json([
+            'token' => $token,
+            'user' => ApiPayload::user($user->fresh()),
+        ]);
+    }
+
+    /**
      * Get authenticated user.
      */
     public function me(Request $request)
@@ -201,6 +281,38 @@ class AuthController extends Controller
         return response()->json([
             'message' => 'Profile updated successfully.',
             'user' => ApiPayload::user($user->fresh()),
+        ]);
+    }
+
+    /**
+     * Delete account and purge personally identifiable fields.
+     */
+    public function deleteAccount(Request $request)
+    {
+        $user = $request->user();
+
+        DB::transaction(function () use ($user) {
+            EmailVerificationCode::where('user_id', $user->id)->delete();
+            PasswordResetCode::where('user_id', $user->id)->delete();
+            $user->groups()->detach();
+
+            $anonymizedEmail = 'deleted+'.Str::uuid().'@splitmate.invalid';
+
+            $user->forceFill([
+                'name' => 'Deleted User',
+                'email' => $anonymizedEmail,
+                'google_id' => null,
+                'apple_id' => null,
+                'password' => Hash::make(Str::random(40)),
+                'is_active' => false,
+                'email_verified_at' => null,
+            ])->save();
+
+            $user->tokens()->delete();
+        });
+
+        return response()->json([
+            'message' => 'Account deleted successfully.',
         ]);
     }
 
@@ -446,5 +558,133 @@ class AuthController extends Controller
         }
 
         return $payload;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function verifyAppleIdentityToken(string $idToken): ?array
+    {
+        $parts = explode('.', $idToken);
+        if (count($parts) !== 3) {
+            return null;
+        }
+
+        $header = $this->decodeJwtPart($parts[0]);
+        $payload = $this->decodeJwtPart($parts[1]);
+        if (!is_array($header) || !is_array($payload)) {
+            return null;
+        }
+
+        if (($header['alg'] ?? null) !== 'RS256') {
+            return null;
+        }
+
+        $kid = (string) ($header['kid'] ?? '');
+        if ($kid === '') {
+            return null;
+        }
+
+        $publicKey = $this->applePublicKeyForKid($kid);
+        if (!$publicKey) {
+            return null;
+        }
+
+        $signedPart = $parts[0].'.'.$parts[1];
+        $signature = $this->decodeBase64Url($parts[2]);
+        if ($signature === null) {
+            return null;
+        }
+
+        $verified = openssl_verify($signedPart, $signature, $publicKey, OPENSSL_ALGO_SHA256);
+        if ($verified !== 1) {
+            return null;
+        }
+
+        if ((string) ($payload['iss'] ?? '') !== self::APPLE_ISSUER) {
+            return null;
+        }
+
+        $configuredAudience = trim((string) env('APPLE_CLIENT_ID', ''));
+        if ($configuredAudience !== '') {
+            if ((string) ($payload['aud'] ?? '') !== $configuredAudience) {
+                return null;
+            }
+        }
+
+        $exp = (int) ($payload['exp'] ?? 0);
+        if ($exp > 0 && $exp < time()) {
+            return null;
+        }
+
+        return $payload;
+    }
+
+    private function applePublicKeyForKid(string $kid): mixed
+    {
+        try {
+            $response = Http::timeout(10)
+                ->acceptJson()
+                ->get('https://appleid.apple.com/auth/keys');
+        } catch (\Throwable $e) {
+            return null;
+        }
+
+        if (!$response->successful()) {
+            return null;
+        }
+
+        $keys = $response->json('keys');
+        if (!is_array($keys)) {
+            return null;
+        }
+
+        foreach ($keys as $key) {
+            if (!is_array($key) || (string) ($key['kid'] ?? '') !== $kid) {
+                continue;
+            }
+
+            $x5c = $key['x5c'][0] ?? null;
+            if (!is_string($x5c) || trim($x5c) === '') {
+                continue;
+            }
+
+            $pem = "-----BEGIN CERTIFICATE-----\n".chunk_split($x5c, 64, "\n")."-----END CERTIFICATE-----\n";
+            $publicKey = openssl_pkey_get_public($pem);
+            if ($publicKey !== false) {
+                return $publicKey;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function decodeJwtPart(string $part): ?array
+    {
+        $decoded = $this->decodeBase64Url($part);
+        if ($decoded === null) {
+            return null;
+        }
+
+        $json = json_decode($decoded, true);
+        return is_array($json) ? $json : null;
+    }
+
+    private function decodeBase64Url(string $value): ?string
+    {
+        $remainder = strlen($value) % 4;
+        if ($remainder > 0) {
+            $value .= str_repeat('=', 4 - $remainder);
+        }
+
+        $decoded = base64_decode(strtr($value, '-_', '+/'), true);
+        if ($decoded === false) {
+            return null;
+        }
+
+        return $decoded;
     }
 }
