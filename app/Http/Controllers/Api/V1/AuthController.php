@@ -164,13 +164,13 @@ class AuthController extends Controller
         ]);
 
         $appleUser = $this->verifyAppleIdentityToken($validated['id_token']);
-        if (!$appleUser || empty($appleUser['sub']) || empty($appleUser['email'])) {
+        if (!$appleUser || empty($appleUser['sub'])) {
             throw ValidationException::withMessages([
                 'id_token' => ['Invalid Apple token.'],
             ]);
         }
 
-        $email = strtolower(trim((string) $appleUser['email']));
+        $email = strtolower(trim((string) ($appleUser['email'] ?? '')));
         $appleId = (string) $appleUser['sub'];
         $name = trim((string) ($validated['name'] ?? ''));
         if ($name === '') {
@@ -181,7 +181,7 @@ class AuthController extends Controller
         }
 
         $user = User::where('apple_id', $appleId)->first();
-        if (!$user) {
+        if (!$user && $email !== '') {
             $user = User::whereRaw('LOWER(email) = ?', [$email])->first();
         }
 
@@ -191,13 +191,19 @@ class AuthController extends Controller
             ]);
         }
 
-        if ($user) {
+        if ($user && $email !== '') {
             $existingEmailOwner = User::whereRaw('LOWER(email) = ?', [$email])->first();
             if ($existingEmailOwner && $existingEmailOwner->id !== $user->id) {
                 throw ValidationException::withMessages([
                     'email' => ['Another account already uses this email address.'],
                 ]);
             }
+        }
+
+        if (!$user && $email === '') {
+            throw ValidationException::withMessages([
+                'id_token' => ['Apple did not provide an email for this sign-in. Please revoke Splitmate access in Apple ID settings and try again.'],
+            ]);
         }
 
         if (!$user) {
@@ -213,10 +219,12 @@ class AuthController extends Controller
         } else {
             $updates = [
                 'apple_id' => $appleId,
-                'email' => $email,
                 'is_active' => true,
                 'email_verified_at' => now(),
             ];
+            if ($email !== '') {
+                $updates['email'] = $email;
+            }
             if (trim((string) $user->name) === '' || ($validated['name'] ?? null) !== null) {
                 $updates['name'] = $name;
             }
