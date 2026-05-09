@@ -458,6 +458,7 @@ class AuthController extends Controller
         }
 
         $code = (string) random_int(100000, 999999);
+        $token = Str::random(64);
 
         PasswordResetCode::where('user_id', $user->id)
             ->whereNull('used_at')
@@ -466,12 +467,15 @@ class AuthController extends Controller
         PasswordResetCode::create([
             'user_id' => $user->id,
             'code' => $code,
+            'token' => $token,
             'expires_at' => now()->addMinutes(self::RESET_CODE_EXPIRY_MINUTES),
         ]);
 
+        $resetLink = rtrim((string) config('app.url'), '/').'/reset-password?token='.urlencode($token).'&email='.urlencode($normalizedEmail);
+
         try {
             Mail::raw(
-                "Your SplitMate password reset code is: {$code}. It expires in ".self::RESET_CODE_EXPIRY_MINUTES." minutes.",
+                "Reset your SplitMate password using this secure link: {$resetLink}\n\nThis link expires in ".self::RESET_CODE_EXPIRY_MINUTES." minutes.",
                 function ($message) use ($user) {
                     $message->to($user->email)->subject('SplitMate Password Reset');
                 }
@@ -481,11 +485,13 @@ class AuthController extends Controller
         }
 
         $response = [
-            'message' => 'If the account exists, a password reset code has been sent.',
+            'message' => 'If the account exists, a password reset link has been sent.',
         ];
 
         if (app()->environment('local')) {
             $response['debug_code'] = $code;
+            $response['debug_token'] = $token;
+            $response['debug_reset_link'] = $resetLink;
         }
 
         return response()->json($response);
@@ -498,7 +504,7 @@ class AuthController extends Controller
     {
         $validated = $request->validate([
             'email' => 'required|string|email',
-            'code' => 'required|string|size:6',
+            'token' => 'required|string|min:16',
             'password' => 'required|string|min:8|confirmed',
         ]);
 
@@ -512,7 +518,7 @@ class AuthController extends Controller
         }
 
         $record = PasswordResetCode::where('user_id', $user->id)
-            ->where('code', $validated['code'])
+            ->where('token', $validated['token'])
             ->whereNull('used_at')
             ->where('expires_at', '>', now())
             ->latest('id')
@@ -520,7 +526,7 @@ class AuthController extends Controller
 
         if (!$record) {
             throw ValidationException::withMessages([
-                'code' => ['Invalid or expired reset code.'],
+                'token' => ['Invalid or expired reset link.'],
             ]);
         }
 

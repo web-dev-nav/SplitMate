@@ -10,6 +10,7 @@ class PasswordResetCode extends Model
     protected $fillable = [
         'user_id',
         'code',
+        'token',
         'expires_at',
         'used_at',
     ];
