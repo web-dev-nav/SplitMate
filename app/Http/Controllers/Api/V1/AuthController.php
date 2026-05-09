@@ -669,6 +669,11 @@ class AuthController extends Controller
                 continue;
             }
 
+            $publicKeyFromJwk = $this->publicKeyFromJwk($key);
+            if ($publicKeyFromJwk !== null) {
+                return $publicKeyFromJwk;
+            }
+
             $x5c = $key['x5c'][0] ?? null;
             if (!is_string($x5c) || trim($x5c) === '') {
                 continue;
@@ -682,6 +687,81 @@ class AuthController extends Controller
         }
 
         return null;
+    }
+
+    private function publicKeyFromJwk(array $jwk): mixed
+    {
+        $n = $jwk['n'] ?? null;
+        $e = $jwk['e'] ?? null;
+
+        if (!is_string($n) || !is_string($e) || $n === '' || $e === '') {
+            return null;
+        }
+
+        $modulus = $this->decodeBase64Url($n);
+        $exponent = $this->decodeBase64Url($e);
+        if ($modulus === null || $exponent === null) {
+            return null;
+        }
+
+        $rsaPublicKey = $this->asn1Sequence(
+            $this->asn1Integer($modulus).$this->asn1Integer($exponent)
+        );
+
+        $algorithmIdentifier = hex2bin('300d06092a864886f70d0101010500');
+        if ($algorithmIdentifier === false) {
+            return null;
+        }
+
+        $subjectPublicKeyInfo = $this->asn1Sequence(
+            $algorithmIdentifier.$this->asn1BitString($rsaPublicKey)
+        );
+
+        $pem = "-----BEGIN PUBLIC KEY-----\n"
+            .chunk_split(base64_encode($subjectPublicKeyInfo), 64, "\n")
+            ."-----END PUBLIC KEY-----\n";
+
+        $publicKey = openssl_pkey_get_public($pem);
+        return $publicKey === false ? null : $publicKey;
+    }
+
+    private function asn1Sequence(string $value): string
+    {
+        return "\x30".$this->asn1Length(strlen($value)).$value;
+    }
+
+    private function asn1Integer(string $value): string
+    {
+        if ($value === '') {
+            $value = "\x00";
+        }
+
+        if ((ord($value[0]) & 0x80) !== 0) {
+            $value = "\x00".$value;
+        }
+
+        return "\x02".$this->asn1Length(strlen($value)).$value;
+    }
+
+    private function asn1BitString(string $value): string
+    {
+        $payload = "\x00".$value;
+        return "\x03".$this->asn1Length(strlen($payload)).$payload;
+    }
+
+    private function asn1Length(int $length): string
+    {
+        if ($length < 128) {
+            return chr($length);
+        }
+
+        $temp = '';
+        while ($length > 0) {
+            $temp = chr($length & 0xff).$temp;
+            $length >>= 8;
+        }
+
+        return chr(0x80 | strlen($temp)).$temp;
     }
 
     /**
