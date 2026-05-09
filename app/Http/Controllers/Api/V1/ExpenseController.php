@@ -170,7 +170,7 @@ class ExpenseController extends Controller
             'paid_by_user_id' => 'required|string|exists:users,uuid',
             'expense_date' => 'required|date',
             'category' => 'required|string|max:50',
-            'participant_ids' => 'required|array|min:2',
+            'participant_ids' => 'required|array|min:1',
             'participant_ids.*' => 'string|exists:users,uuid',
         ]);
 
@@ -252,7 +252,7 @@ class ExpenseController extends Controller
         }
 
         $validated = $request->validate([
-            'participant_ids' => 'required|array|min:2',
+            'participant_ids' => 'required|array|min:1',
             'participant_ids.*' => 'string|exists:users,uuid',
         ]);
 

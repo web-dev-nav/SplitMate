@@ -175,7 +175,13 @@ class AuthController extends Controller
         $appleId = (string) $appleUser['sub'];
         $name = trim((string) ($validated['name'] ?? ''));
         if ($name === '') {
-            $name = trim((string) ($appleUser['name'] ?? 'Apple User'));
+            $name = trim((string) ($appleUser['name'] ?? ''));
+        }
+        if ($name === '') {
+            $emailLocalPart = trim((string) strstr($email, '@', true));
+            if ($emailLocalPart !== '') {
+                $name = ucwords(str_replace(['.', '_', '-'], ' ', $emailLocalPart));
+            }
         }
         if ($name === '') {
             $name = 'Apple User';
@@ -226,7 +232,11 @@ class AuthController extends Controller
             if ($email !== '') {
                 $updates['email'] = $email;
             }
-            if (trim((string) $user->name) === '' || ($validated['name'] ?? null) !== null) {
+            if (
+                trim((string) $user->name) === ''
+                || trim((string) $user->name) === 'Apple User'
+                || ($validated['name'] ?? null) !== null
+            ) {
                 $updates['name'] = $name;
             }
             $user->forceFill($updates)->save();
